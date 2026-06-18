@@ -1,0 +1,5 @@
+.claude/
+__pycache__/
+yt-dlp web downloader UI-handoff.zip
+yt-dlp-web-downloader-ui/
+downloads/
