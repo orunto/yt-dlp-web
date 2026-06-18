@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>yt-dlp · web downloader</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: #0a0a0a; }
+    :root { --ac: #ff0033; --on-ac: #ffffff; --amber: #e0a93c; }
+    ::selection { background: rgba(255,0,51,.28); }
+    body {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 13px; line-height: 1.55; color: #c9d1d9;
+      -webkit-font-smoothing: antialiased;
+    }
+    input, button, textarea { font-family: inherit; }
+    input:focus, textarea:focus { outline: none; }
+    input::placeholder { color: #444; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: #0d0d0d; }
+    ::-webkit-scrollbar-thumb { background: #262626; border: 2px solid #0d0d0d; }
+    ::-webkit-scrollbar-thumb:hover { background: #333; }
+    .ytlog { scrollbar-width: thin; scrollbar-color: #262626 #0d0d0d; }
+    @keyframes blink { 0%,49% { opacity:1; } 50%,100% { opacity:0; } }
+    @keyframes spin  { to { transform: rotate(360deg); } }
+    .spinner {
+      width: 12px; height: 12px; flex-shrink: 0;
+      border: 2px solid currentColor; border-top-color: transparent;
+      border-radius: 50%; display: inline-block;
+      animation: spin .7s linear infinite;
+    }
+    .dl-spinner {
+      width: 13px; height: 13px;
+      border: 2px solid currentColor; border-top-color: transparent;
+      border-radius: 50%; display: inline-block;
+      animation: spin .7s linear infinite;
+    }
+    .cursor {
+      display: inline-block; width: 8px; height: 14px;
+      background: var(--ac); vertical-align: middle;
+      animation: blink 1s step-end infinite;
+    }
+    .idle-cursor {
+      display: inline-block; width: 8px; height: 14px;
+      background: #3d3d3d; vertical-align: middle; margin-left: 4px;
+      animation: blink 1s step-end infinite;
+    }
+    .chip {
+      background: #141414; border: 1px solid #262626; color: #9a9a9a;
+      padding: 4px 9px; font-size: 11px; cursor: pointer;
+      font-family: inherit; transition: border-color .1s, color .1s;
+    }
+    .chip:hover { border-color: var(--ac); color: var(--ac); }
+    button { cursor: pointer; }
+  </style>
+</head>
+<body>
+<div style="min-height:100vh;background:#0a0a0a;padding:24px 16px 64px;">
+<div style="max-width:980px;margin:0 auto;">
+
+  <!-- Title bar -->
+  <div style="display:flex;align-items:center;gap:10px;border:1px solid #1f1f1f;background:#0d0d0d;padding:10px 14px;">
+    <div style="display:flex;gap:7px;align-items:center;">
+      <span style="width:11px;height:11px;background:#2a2a2a;display:block;"></span>
+      <span style="width:11px;height:11px;background:#2a2a2a;display:block;"></span>
+      <span style="width:11px;height:11px;background:var(--ac);display:block;"></span>
+    </div>
+    <span style="color:var(--ac);font-weight:700;letter-spacing:.5px;">yt-dlp</span>
+    <span style="color:#4d4d4d;">/</span>
+    <span style="color:#6b6b6b;">web downloader</span>
+    <span style="margin-left:auto;display:flex;align-items:center;gap:14px;">
+      <span id="accent-picker" style="display:flex;gap:6px;align-items:center;"></span>
+      <span style="color:#3d3d3d;font-size:11px;letter-spacing:.5px;">yt-dlp · python 3.x</span>
+    </span>
+  </div>
+
+  <!-- 01 Source URL -->
+  <section style="border:1px solid #1f1f1f;border-top:none;background:#0c0c0c;">
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid #1a1a1a;background:#0d0d0d;">
+      <span style="color:var(--ac);font-weight:700;">01</span>
+      <span style="color:#888;letter-spacing:1px;text-transform:uppercase;font-size:11px;">Source URL</span>
+    </div>
+    <div style="padding:16px 14px;">
+      <div id="mode-toggle" style="margin-bottom:12px;"></div>
+      <div style="display:flex;gap:10px;align-items:stretch;">
+        <div style="flex:1;display:flex;align-items:center;border:1px solid #2a2a2a;background:#070707;padding:0 12px;">
+          <span style="color:var(--ac);margin-right:8px;user-select:none;">&gt;</span>
+          <input id="url-input" type="text" spellcheck="false" autocomplete="off"
+            placeholder="https://www.youtube.com/watch?v=..."
+            style="flex:1;background:transparent;border:none;color:#e6e6e6;font-size:14px;padding:13px 0;"
+            oninput="app.setUrl(this.value)"
+            onkeydown="if(event.key==='Enter')app.fetchInfo()">
+        </div>
+        <button id="fetch-btn" onclick="app.fetchInfo()"
+          style="flex:none;display:flex;align-items:center;gap:8px;background:var(--ac);color:var(--on-ac);border:none;font-weight:700;font-size:13px;padding:0 22px;cursor:pointer;letter-spacing:.3px;font-family:inherit;">
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 02 Metadata (hidden until fetch) -->
+  <section id="section-meta" style="display:none;border:1px solid #1f1f1f;border-top:none;background:#0c0c0c;">
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid #1a1a1a;background:#0d0d0d;">
+      <span style="color:var(--ac);font-weight:700;">02</span>
+      <span style="color:#888;letter-spacing:1px;text-transform:uppercase;font-size:11px;">Metadata</span>
+      <span style="margin-left:auto;color:#3d8c5c;font-size:11px;">● fetched</span>
+    </div>
+    <div id="meta-content" style="padding:16px 14px;"></div>
+  </section>
+
+  <!-- 03 Download -->
+  <section style="border:1px solid #1f1f1f;border-top:none;background:#0c0c0c;">
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid #1a1a1a;background:#0d0d0d;">
+      <span style="color:var(--ac);font-weight:700;">03</span>
+      <span style="color:#888;letter-spacing:1px;text-transform:uppercase;font-size:11px;">Download</span>
+    </div>
+    <div style="padding:16px 14px;">
+
+      <!-- Quality picker -->
+      <div id="quality-picker"></div>
+
+      <!-- Download button (directly under quality picker) -->
+      <div id="dl-btn"></div>
+
+      <!-- Advanced toggle -->
+      <div id="advanced-toggle" style="margin-top:1px;"></div>
+
+      <!-- Advanced section (hidden by default) -->
+      <div id="advanced-section" style="display:none;">
+
+        <!-- Post-processing -->
+        <div style="margin-top:16px;margin-bottom:18px;">
+          <div style="color:#5a5a5a;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">post-processing</div>
+          <div id="pp-list" style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#1a1a1a;border:1px solid #1a1a1a;"></div>
+        </div>
+
+        <!-- Output template -->
+        <div style="margin-bottom:18px;">
+          <div style="color:#5a5a5a;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">output template</div>
+          <div style="display:flex;align-items:center;border:1px solid #2a2a2a;background:#070707;padding:0 12px;margin-bottom:8px;">
+            <span style="color:#444;margin-right:8px;">-o</span>
+            <input id="out-tpl" type="text" spellcheck="false"
+              style="flex:1;background:transparent;border:none;color:var(--ac);font-size:13px;padding:11px 0;"
+              oninput="app.setOutTpl(this.value)">
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+            <span style="color:#444;font-size:11px;">insert:</span>
+            <div id="chips" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+          </div>
+        </div>
+
+        <!-- Rate + Sub langs -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:18px;">
+          <div>
+            <div style="color:#5a5a5a;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">rate limit</div>
+            <div style="display:flex;align-items:center;border:1px solid #2a2a2a;background:#070707;padding:0 12px;">
+              <span style="color:#444;margin-right:8px;">-r</span>
+              <input id="rate-input" type="text" spellcheck="false" placeholder="1M  ·  500K  ·  unlimited"
+                style="flex:1;background:transparent;border:none;color:#e6e6e6;font-size:13px;padding:10px 0;"
+                oninput="app.setRate(this.value)">
+            </div>
+          </div>
+          <div>
+            <div style="color:#5a5a5a;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">subtitle langs</div>
+            <div style="display:flex;align-items:center;border:1px solid #2a2a2a;background:#070707;padding:0 12px;">
+              <span style="color:#444;margin-right:8px;">--sub-langs</span>
+              <input id="sublang-input" type="text" spellcheck="false" placeholder="en,fr"
+                style="flex:1;background:transparent;border:none;color:#e6e6e6;font-size:13px;padding:10px 0;"
+                oninput="app.setSubLang(this.value)">
+            </div>
+          </div>
+        </div>
+
+        <!-- Custom format code -->
+        <div style="margin-bottom:18px;">
+          <div style="color:#5a5a5a;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">format override</div>
+          <div style="display:flex;align-items:center;border:1px solid #2a2a2a;background:#070707;padding:0 12px;">
+            <span style="color:#444;margin-right:8px;">-f</span>
+            <input id="custom-fmt" type="text" spellcheck="false" placeholder="e.g. 137+251  ·  leave blank to use quality selection above"
+              style="flex:1;background:transparent;border:none;color:var(--ac);font-size:13px;padding:10px 0;"
+              oninput="app.setCustomFmt(this.value)">
+          </div>
+        </div>
+
+        <!-- Skip toggle -->
+        <div id="skip-toggle" style="margin-bottom:18px;"></div>
+
+        <!-- Command preview -->
+        <div style="border:1px solid #1f1f1f;background:#080808;">
+          <div style="padding:6px 12px;border-bottom:1px solid #1a1a1a;color:#5a5a5a;font-size:11px;text-transform:uppercase;letter-spacing:1px;">command preview</div>
+          <div style="padding:12px;font-size:12.5px;line-height:1.7;word-break:break-all;white-space:pre-wrap;">
+            <span style="color:var(--ac);">$ </span><span id="cmd-preview" style="color:#c9d1d9;"></span>
+          </div>
+        </div>
+
+      </div><!-- /advanced-section -->
+
+      <!-- Terminal log -->
+      <div style="margin-top:16px;border:1px solid #1f1f1f;background:#070707;">
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid #1a1a1a;background:#0b0b0b;">
+          <span style="color:#5a5a5a;font-size:11px;text-transform:uppercase;letter-spacing:1px;">output</span>
+          <span style="margin-left:auto;color:#3d3d3d;font-size:11px;">stdout · stderr</span>
+          <button onclick="app.clearLog()"
+            style="background:transparent;border:1px solid #262626;color:#6b6b6b;padding:2px 8px;font-size:11px;cursor:pointer;font-family:inherit;">clear</button>
+        </div>
+        <div id="log" class="ytlog" style="height:230px;overflow-y:auto;padding:12px;font-size:12.5px;line-height:1.6;">
+          <div id="log-lines"></div>
+          <div id="log-cursor"></div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+</div>
+</div>
+
+<script>
+'use strict';
+
+const ACCENT_MAP = {
+  green:   ['#3fd07a', '#062712'],
+  amber:   ['#e0a93c', '#062712'],
+  cyan:    ['#3fd0c4', '#062712'],
+  youtube: ['#ff0033', '#ffffff'],
+};
+
+const PP_DEFS = [
+  { key: 'extractAudio', label: 'Extract Audio' },
+  { key: 'mp3',          label: 'Convert to MP3' },
+  { key: 'remux',        label: 'Remux to MP4' },
+  { key: 'thumb',        label: 'Embed Thumbnail' },
+  { key: 'subs',         label: 'Embed Subtitles' },
+  { key: 'metadata',     label: 'Embed Metadata' },
+  { key: 'chapters',     label: 'Split by Chapters' },
+  { key: 'sponsor',      label: 'Remove Sponsor Segments' },
+];
+
+const CHIPS = ['%(uploader)s', '%(upload_date)s', '%(id)s', '%(playlist_index)s'];
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+class App {
+  constructor() {
+    this.state = {
+      mode:            'single',
+      playlistCount:   null,
+      url:             '',
+      fetching:        false,
+      fetched:         false,
+      meta:            null,
+      formats:         [],       // raw yt-dlp format list (for metadata table)
+      formatsOpen:     false,
+      friendlyFormats: [],       // [{key, label, ext, size, fmtFlag}]
+      selectedQuality: null,     // key from friendlyFormats
+      showAdvanced:    false,
+      customFmt:       '',       // format override (advanced)
+      pp: {
+        extractAudio: false, mp3: false, remux: false,
+        thumb: true, subs: false, metadata: true,
+        chapters: false, sponsor: false,
+      },
+      outTpl:          '%(title)s.%(ext)s',
+      rate:            '',
+      subLang:         'en',
+      skip:            false,
+      downloading:     false,
+      accentColor:     'youtube',
+    };
+    this.ws = null;
+    this._init();
+  }
+
+  get ac()   { return ACCENT_MAP[this.state.accentColor][0]; }
+  get onAc() { return ACCENT_MAP[this.state.accentColor][1]; }
+
+  _init() {
+    this._applyAccent();
+    this._renderAll();
+    document.getElementById('url-input').value    = this.state.url;
+    document.getElementById('out-tpl').value      = this.state.outTpl;
+    document.getElementById('rate-input').value   = this.state.rate;
+    document.getElementById('sublang-input').value = this.state.subLang;
+  }
+
+  // ── Input handlers ──────────────────────────────────────────────────────────
+  setUrl(v)       { this.state.url = v;       this._renderCmd(); }
+  setOutTpl(v)    { this.state.outTpl = v;    this._renderCmd(); }
+  setRate(v)      { this.state.rate = v;      this._renderCmd(); }
+  setSubLang(v)   { this.state.subLang = v;   this._renderCmd(); }
+  setCustomFmt(v) { this.state.customFmt = v; this._renderCmd(); this._renderDlBtn(); }
+
+  selectQuality(key) {
+    this.state.selectedQuality = key;
+    this._renderQualityPicker();
+    this._renderDlBtn();
+    this._renderCmd();
+  }
+
+  togglePp(key) {
+    this.state.pp = { ...this.state.pp, [key]: !this.state.pp[key] };
+    this._renderPpList();
+    this._renderCmd();
+  }
+
+  toggleSkip() {
+    this.state.skip = !this.state.skip;
+    this._renderSkipToggle();
+    this._renderCmd();
+  }
+
+  toggleFormats() {
+    this.state.formatsOpen = !this.state.formatsOpen;
+    this._renderMetaContent();
+  }
+
+  toggleAdvanced() {
+    this.state.showAdvanced = !this.state.showAdvanced;
+    this._renderAdvancedToggle();
+  }
+
+  insertToken(tok) {
+    this.state.outTpl += tok;
+    document.getElementById('out-tpl').value = this.state.outTpl;
+    this._renderCmd();
+  }
+
+  setAccent(color) {
+    this.state.accentColor = color;
+    this._applyAccent();
+    this._renderAccentPicker();
+    this._renderFetchBtn();
+    this._renderDlBtn();
+  }
+
+  clearLog() {
+    document.getElementById('log-lines').innerHTML = '';
+    this._renderLogCursor();
+  }
+
+  _applyAccent() {
+    document.documentElement.style.setProperty('--ac',    this.ac);
+    document.documentElement.style.setProperty('--on-ac', this.onAc);
+  }
+
+  // ── Full render ─────────────────────────────────────────────────────────────
+  _renderAll() {
+    this._renderAccentPicker();
+    this._renderModeToggle();
+    this._renderFetchBtn();
+    this._renderMetaSec();
+    this._renderQualityPicker();
+    this._renderDlBtn();
+    this._renderAdvancedToggle();
+    this._renderPpList();
+    this._renderSkipToggle();
+    this._renderCmd();
+    this._renderChips();
+    this._renderLogCursor();
+  }
+
+  // ── Accent picker ───────────────────────────────────────────────────────────
+  _renderAccentPicker() {
+    const cur = this.state.accentColor;
+    document.getElementById('accent-picker').innerHTML =
+      Object.entries(ACCENT_MAP).map(([k, [v]]) =>
+        `<button onclick="app.setAccent('${k}')" title="${k}"
+          style="width:12px;height:12px;border-radius:50%;background:${v};border:2px solid ${cur===k?'#fff':'transparent'};padding:0;cursor:pointer;outline:none;flex-shrink:0;"></button>`
+      ).join('');
+  }
+
+  // ── Mode toggle ─────────────────────────────────────────────────────────────
+  _renderModeToggle() {
+    const { mode, playlistCount, fetched } = this.state;
+    const isSingle = mode === 'single';
+
+    const countChip = playlistCount
+      ? `<span style="display:inline-block;background:rgba(0,0,0,.25);padding:1px 6px;margin-left:7px;font-size:10px;font-weight:400;letter-spacing:.3px;">${playlistCount}</span>`
+      : '';
+
+    // Before fetch: both labels are dim, no badge, pointer-events off
+    if (!fetched) {
+      document.getElementById('mode-toggle').innerHTML = `
+        <div style="position:relative;display:inline-flex;border:1px solid #1a1a1a;background:#0a0a0a;overflow:hidden;pointer-events:none;opacity:.35;">
+          <div style="position:absolute;top:0;bottom:0;left:0;width:50%;background:#2a2a2a;z-index:0;"></div>
+          <span style="position:relative;z-index:1;flex:1;color:#6b6b6b;padding:8px 20px;font-size:12px;letter-spacing:.3px;font-family:inherit;white-space:nowrap;">single video</span>
+          <span style="position:relative;z-index:1;flex:1;color:#555;padding:8px 20px;font-size:12px;letter-spacing:.3px;font-family:inherit;white-space:nowrap;">playlist</span>
+        </div>`;
+      return;
+    }
+
+    // After fetch: badge locked to detected position, no onclick
+    const label = (active) =>
+      `position:relative;z-index:1;flex:1;background:transparent;border:none;cursor:default;` +
+      `color:${active ? 'var(--on-ac)' : '#555'};` +
+      `padding:8px 20px;font-size:12px;letter-spacing:.3px;` +
+      `font-family:inherit;font-weight:${active ? '700' : '400'};white-space:nowrap;`;
+
+    document.getElementById('mode-toggle').innerHTML = `
+      <div style="position:relative;display:inline-flex;border:1px solid #262626;background:#0a0a0a;overflow:hidden;">
+        <div style="position:absolute;top:0;bottom:0;left:${isSingle ? '0' : '50%'};width:50%;background:var(--ac);z-index:0;pointer-events:none;"></div>
+        <span style="${label(isSingle)}">single video</span>
+        <span style="${label(!isSingle)}">playlist${countChip}</span>
+      </div>`;
+  }
+
+  // ── Fetch button ────────────────────────────────────────────────────────────
+  _renderFetchBtn() {
+    const el = document.getElementById('fetch-btn');
+    el.innerHTML  = this.state.fetching ? `<span class="spinner"></span> Fetching…` : 'Fetch Info';
+    el.disabled   = this.state.fetching;
+  }
+
+  // ── Metadata section ────────────────────────────────────────────────────────
+  _renderMetaSec() {
+    const sec = document.getElementById('section-meta');
+    sec.style.display = this.state.fetched ? 'block' : 'none';
+    if (this.state.fetched) this._renderMetaContent();
+  }
+
+  _renderMetaContent() {
+    const { meta, formats, formatsOpen } = this.state;
+    if (!meta) return;
+    const thumbHtml = meta.thumbnail
+      ? `<img src="${esc(meta.thumbnail)}" alt="" style="width:240px;height:135px;object-fit:cover;display:block;">`
+      : `<div style="display:flex;align-items:center;justify-content:center;height:100%;"><span style="color:#3d3d3d;font-size:11px;letter-spacing:1px;">[ thumbnail ]</span></div>`;
+    const fmtRows = formatsOpen ? `
+      <div style="border-top:1px solid #1f1f1f;overflow-x:auto;">
+        <div style="min-width:600px;">
+          <div style="display:grid;grid-template-columns:64px 64px 110px 1fr 90px;padding:7px 12px;background:#0b0b0b;border-bottom:1px solid #1a1a1a;color:#5a5a5a;font-size:11px;text-transform:uppercase;letter-spacing:.5px;">
+            <span>code</span><span>ext</span><span>resolution</span><span>codec</span><span style="text-align:right;">filesize</span>
+          </div>
+          ${formats.map(f => `
+            <div style="display:grid;grid-template-columns:64px 64px 110px 1fr 90px;padding:6px 12px;border-bottom:1px solid #131313;font-size:12px;align-items:center;">
+              <span style="color:var(--ac);font-weight:600;">${esc(f.code)}</span>
+              <span style="color:#9a9a9a;">${esc(f.ext)}</span>
+              <span style="color:#c9d1d9;">${esc(f.res)}</span>
+              <span style="color:#7d8590;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(f.codec)}</span>
+              <span style="color:#c9d1d9;text-align:right;">${esc(f.size)}</span>
+            </div>`).join('')}
+        </div>
+      </div>` : '';
+    document.getElementById('meta-content').innerHTML = `
+      <div style="display:flex;gap:16px;align-items:flex-start;">
+        <div style="flex:none;width:240px;height:135px;border:1px solid #262626;position:relative;background-color:#0a0a0a;background-image:repeating-linear-gradient(45deg,#121212 0,#121212 8px,#0d0d0d 8px,#0d0d0d 16px);overflow:hidden;">
+          ${thumbHtml}
+          <span style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.8);color:#ccc;font-size:11px;padding:1px 5px;">${esc(meta.duration)}</span>
+        </div>
+        <div style="flex:1;min-width:0;">
+          <div style="color:#f0f0f0;font-size:16px;font-weight:600;line-height:1.4;margin-bottom:10px;">${esc(meta.title)}</div>
+          <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:12px;">
+            <span style="color:#5a5a5a;">uploader</span><span style="color:#c9d1d9;">${esc(meta.uploader)}</span>
+            <span style="color:#5a5a5a;">duration</span><span style="color:#c9d1d9;">${esc(meta.duration)}</span>
+            <span style="color:#5a5a5a;">views</span><span style="color:#c9d1d9;">${esc(meta.views)}</span>
+            <span style="color:#5a5a5a;">upload</span><span style="color:#c9d1d9;">${esc(meta.uploadDate)}</span>
+            <span style="color:#5a5a5a;">id</span><span style="color:var(--ac);">${esc(meta.id)}</span>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:16px;border:1px solid #1f1f1f;">
+        <button onclick="app.toggleFormats()"
+          style="width:100%;display:flex;align-items:center;gap:8px;background:#0d0d0d;border:none;color:#888;padding:9px 12px;cursor:pointer;font-size:12px;text-align:left;font-family:inherit;">
+          <span style="color:var(--ac);width:10px;display:inline-block;">${formatsOpen ? '▾' : '▸'}</span>
+          <span style="text-transform:uppercase;letter-spacing:1px;">available formats</span>
+          <span style="color:#3d3d3d;">(${formats.length})</span>
+        </button>
+        ${fmtRows}
+      </div>`;
+  }
+
+  // ── Quality picker ──────────────────────────────────────────────────────────
+  _renderQualityPicker() {
+    const { friendlyFormats, selectedQuality, fetched } = this.state;
+    const el = document.getElementById('quality-picker');
+
+    if (!fetched || !friendlyFormats.length) {
+      el.innerHTML = `
+        <div style="border:1px solid #1a1a1a;margin-bottom:1px;">
+          ${['Best quality','720p','Audio only'].map(lbl => `
+            <div style="display:flex;align-items:center;gap:12px;padding:13px 14px;border-bottom:1px solid #131313;opacity:.3;cursor:not-allowed;">
+              <span style="width:14px;height:14px;border-radius:50%;border:2px solid #333;flex-shrink:0;display:inline-block;"></span>
+              <span style="color:#5a5a5a;font-size:13px;">${lbl}</span>
+            </div>`).join('')}
+        </div>`;
+      return;
+    }
+
+    el.innerHTML = `<div style="border:1px solid #1f1f1f;margin-bottom:1px;">` +
+      friendlyFormats.map(f => {
+        const sel = selectedQuality === f.key;
+        return `
+          <div onclick="app.selectQuality('${f.key}')"
+            style="display:flex;align-items:center;gap:12px;padding:13px 14px;border-bottom:1px solid #131313;cursor:pointer;
+                   background:${sel ? '#141414' : '#0c0c0c'};
+                   border-left:3px solid ${sel ? 'var(--ac)' : 'transparent'};
+                   transition:background .1s;">
+            <span style="width:14px;height:14px;border-radius:50%;flex-shrink:0;display:inline-block;
+                         border:2px solid ${sel ? 'var(--ac)' : '#444'};
+                         background:${sel ? 'var(--ac)' : 'transparent'};"></span>
+            <span style="flex:1;color:${sel ? '#f0f0f0' : '#9a9a9a'};font-size:13px;font-weight:${sel ? '600' : '400'};">${esc(f.label)}</span>
+            <span style="color:#5a5a5a;font-size:11px;margin-right:10px;">${esc(f.ext)}</span>
+            <span style="color:${sel ? 'var(--ac)' : '#555'};font-size:12px;min-width:72px;text-align:right;font-weight:${sel?'600':'400'};">${esc(f.size)}</span>
+          </div>`;
+      }).join('') + `</div>`;
+  }
+
+  // ── Download button ─────────────────────────────────────────────────────────
+  _renderDlBtn() {
+    const { downloading, fetched, selectedQuality, friendlyFormats, customFmt } = this.state;
+    const ready = fetched && (selectedQuality || customFmt.trim());
+
+    const fmt   = friendlyFormats.find(f => f.key === selectedQuality);
+    const sizeStr = (fmt && fmt.size && fmt.size !== '?') ? `  ·  ~${fmt.size}` : '';
+
+    const styleDownloading = 'width:100%;display:flex;align-items:center;justify-content:center;gap:10px;background:#1a1a1a;color:#6b6b6b;border:1px solid #262626;font-weight:700;font-size:14px;padding:15px;cursor:wait;letter-spacing:.5px;font-family:inherit;margin-top:1px;';
+    const styleReady       = 'width:100%;display:flex;align-items:center;justify-content:center;gap:10px;background:var(--ac);color:var(--on-ac);border:none;font-weight:700;font-size:14px;padding:15px;cursor:pointer;letter-spacing:.5px;font-family:inherit;margin-top:1px;';
+    const styleDim         = 'width:100%;display:flex;align-items:center;justify-content:center;gap:10px;background:#111;color:#333;border:1px solid #1a1a1a;font-weight:700;font-size:14px;padding:15px;cursor:not-allowed;letter-spacing:.5px;font-family:inherit;margin-top:1px;';
+
+    let style, label, disabled;
+    if (downloading) { style = styleDownloading; label = '<span class="dl-spinner"></span> Downloading…'; disabled = true; }
+    else if (ready)  { style = styleReady;        label = `Download${esc(sizeStr)}`;                        disabled = false; }
+    else             { style = styleDim;           label = 'Select a quality to download';                  disabled = true; }
+
+    document.getElementById('dl-btn').innerHTML =
+      `<button onclick="app.startDownload()" style="${style}" ${disabled ? 'disabled' : ''}>${label}</button>`;
+  }
+
+  // ── Advanced toggle ─────────────────────────────────────────────────────────
+  _renderAdvancedToggle() {
+    const { showAdvanced } = this.state;
+    document.getElementById('advanced-section').style.display = showAdvanced ? 'block' : 'none';
+    document.getElementById('advanced-toggle').innerHTML = `
+      <button onclick="app.toggleAdvanced()"
+        style="width:100%;display:flex;align-items:center;gap:8px;background:#0a0a0a;border:1px solid #1a1a1a;color:#5a5a5a;padding:9px 14px;cursor:pointer;font-size:11px;letter-spacing:1px;text-transform:uppercase;font-family:inherit;margin-top:12px;">
+        <span style="color:${showAdvanced ? 'var(--ac)' : '#3d3d3d'};font-size:10px;">${showAdvanced ? '▾' : '▸'}</span>
+        Advanced options
+      </button>`;
+  }
+
+  // ── Post-processing toggles ─────────────────────────────────────────────────
+  _renderPpList() {
+    const pp = this.state.pp;
+    const boxOn  = 'flex:none;width:16px;height:16px;border:1px solid var(--ac);background:var(--ac);color:var(--on-ac);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;';
+    const boxOff = 'flex:none;width:16px;height:16px;border:1px solid #333;background:#070707;color:transparent;display:flex;align-items:center;justify-content:center;font-size:11px;';
+    const rowOn  = 'display:flex;align-items:center;gap:10px;background:#161616;border:none;color:#e6e6e6;padding:11px 13px;cursor:pointer;font-size:12.5px;text-align:left;width:100%;font-family:inherit;';
+    const rowOff = 'display:flex;align-items:center;gap:10px;background:#0c0c0c;border:none;color:#9a9a9a;padding:11px 13px;cursor:pointer;font-size:12.5px;text-align:left;width:100%;font-family:inherit;';
+    document.getElementById('pp-list').innerHTML = PP_DEFS.map(d => {
+      const on = pp[d.key];
+      return `<button onclick="app.togglePp('${d.key}')" style="${on ? rowOn : rowOff}">
+        <span style="${on ? boxOn : boxOff}">${on ? '×' : ''}</span>
+        <span>${d.label}</span>
+      </button>`;
+    }).join('');
+  }
+
+  // ── Skip toggle ─────────────────────────────────────────────────────────────
+  _renderSkipToggle() {
+    const on = this.state.skip;
+    const boxOn  = 'flex:none;width:16px;height:16px;border:1px solid var(--ac);background:var(--ac);color:var(--on-ac);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;';
+    const boxOff = 'flex:none;width:16px;height:16px;border:1px solid #333;background:#070707;color:transparent;display:flex;align-items:center;justify-content:center;font-size:11px;';
+    const rowOn  = 'display:flex;align-items:center;gap:10px;background:#161616;border:1px solid var(--ac);color:#e6e6e6;padding:12px 13px;cursor:pointer;font-size:12.5px;width:100%;font-family:inherit;';
+    const rowOff = 'display:flex;align-items:center;gap:10px;background:#0c0c0c;border:1px solid #1f1f1f;color:#9a9a9a;padding:12px 13px;cursor:pointer;font-size:12.5px;width:100%;font-family:inherit;';
+    document.getElementById('skip-toggle').innerHTML = `
+      <button onclick="app.toggleSkip()" style="${on ? rowOn : rowOff}">
+        <span style="${on ? boxOn : boxOff}">${on ? '×' : ''}</span>
+        <span>Skip already downloaded</span>
+        <span style="color:#3d3d3d;margin-left:auto;font-size:11px;">--download-archive archive.txt</span>
+      </button>`;
+  }
+
+  // ── Command preview ─────────────────────────────────────────────────────────
+  _renderCmd() {
+    const el = document.getElementById('cmd-preview');
+    if (el) el.textContent = this._buildCommand();
+  }
+
+  // ── Chip insert buttons ─────────────────────────────────────────────────────
+  _renderChips() {
+    document.getElementById('chips').innerHTML = CHIPS.map(c =>
+      `<button class="chip" onclick="app.insertToken('${c}')">${c}</button>`
+    ).join('');
+  }
+
+  // ── Log cursor ──────────────────────────────────────────────────────────────
+  _renderLogCursor() {
+    const hasLines = document.getElementById('log-lines').childElementCount > 0;
+    document.getElementById('log-cursor').innerHTML = hasLines
+      ? `<div style="color:var(--ac);"><span style="opacity:.6;">$ </span><span class="cursor"></span></div>`
+      : `<div style="color:#3d3d3d;">Waiting for download. yt-dlp stdout will stream here.<span class="idle-cursor"></span></div>`;
+  }
+
+  // ── Friendly format computation ─────────────────────────────────────────────
+  _computeFriendlyFormats(formats) {
+    const byHeight = new Map();
+    const audioOnly = [];
+
+    for (const f of formats) {
+      if (f.res === 'audio only') { audioOnly.push(f); continue; }
+      const m = f.res.match(/^(\d+)x(\d+)$/);
+      if (!m) continue;
+      const h = parseInt(m[2]);
+      // yt-dlp lists formats in ascending quality; overwrite keeps the best per height
+      byHeight.set(h, f);
+    }
+
+    const heights = [...byHeight.keys()].sort((a, b) => b - a);
+    const result = heights.map(h => {
+      const f = byHeight.get(h);
+      const label = h >= 2160 ? '4K Ultra HD'
+                  : h >= 1440 ? `${h}p  QHD`
+                  : h >= 1080 ? `${h}p  Full HD`
+                  : h >= 720  ? `${h}p  HD`
+                  :              `${h}p`;
+      return { key: String(h), label, ext: f.ext, size: f.size, fmtFlag: `bv*[height<=${h}]+ba/b` };
+    });
+
+    // Best audio: prefer m4a, then anything
+    const bestAudio = audioOnly.find(f => f.ext === 'm4a') || audioOnly[0];
+    if (bestAudio) {
+      result.push({ key: 'audio', label: 'Audio only', ext: bestAudio.ext, size: bestAudio.size, fmtFlag: 'ba/b' });
+    }
+    return result;
+  }
+
+  // ── Build display command ───────────────────────────────────────────────────
+  _buildCommand() {
+    const s = this.state;
+    const parts = ['yt-dlp'];
+    parts.push(`-f "${this._getFmtFlag()}"`);
+    const { pp } = s;
+    if (pp.extractAudio) parts.push('-x');
+    if (pp.mp3)          parts.push('--audio-format mp3');
+    if (pp.remux)        parts.push('--remux-video mp4');
+    if (pp.thumb)        parts.push('--embed-thumbnail');
+    if (pp.subs)         { parts.push('--embed-subs'); if (s.subLang) parts.push(`--sub-langs ${s.subLang}`); }
+    if (pp.metadata)     parts.push('--embed-metadata');
+    if (pp.chapters)     parts.push('--split-chapters');
+    if (pp.sponsor)      parts.push('--sponsorblock-remove all');
+    if (s.rate)          parts.push(`-r ${s.rate}`);
+    if (s.skip)          parts.push('--download-archive archive.txt');
+    parts.push(s.mode === 'playlist' ? '--yes-playlist' : '--no-playlist');
+    parts.push(`-o "${s.outTpl || '%(title)s.%(ext)s'}"`);
+    parts.push(`"${s.url || 'URL'}"`);
+    return parts.join(' ');
+  }
+
+  _getFmtFlag() {
+    const { selectedQuality, friendlyFormats, customFmt } = this.state;
+    if (customFmt.trim()) return customFmt.trim();
+    const f = friendlyFormats.find(f => f.key === selectedQuality);
+    return f ? f.fmtFlag : 'bv*+ba/b';
+  }
+
+  // ── Fetch video info ────────────────────────────────────────────────────────
+  async fetchInfo() {
+    const url = this.state.url.trim();
+    if (this.state.fetching || !url) return;
+    this.state.fetching = true;
+    this._renderFetchBtn();
+    try {
+      const res  = await fetch('/api/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, mode: this.state.mode }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        this._appendLog(`[error] ${data.error}`, '#f85149', false);
+      } else {
+        const friendly = this._computeFriendlyFormats(data.formats || []);
+        this.state.meta            = data;
+        this.state.formats         = data.formats || [];
+        this.state.friendlyFormats = friendly;
+        this.state.selectedQuality = friendly.length ? friendly[0].key : null;
+        this.state.fetched         = true;
+        // Auto-detect single vs playlist from metadata
+        this.state.playlistCount   = data.playlistCount || null;
+        this.state.mode            = data.isPlaylist ? 'playlist' : 'single';
+        this._renderModeToggle();
+        this._renderMetaSec();
+        this._renderQualityPicker();
+        this._renderDlBtn();
+        this._renderCmd();
+      }
+    } catch (err) {
+      this._appendLog(`[error] ${err.message}`, '#f85149', false);
+    } finally {
+      this.state.fetching = false;
+      this._renderFetchBtn();
+    }
+  }
+
+  // ── Start download ──────────────────────────────────────────────────────────
+  startDownload() {
+    const { downloading, url, selectedQuality, customFmt } = this.state;
+    if (downloading || !url.trim() || (!selectedQuality && !customFmt.trim())) return;
+
+    this.state.downloading = true;
+    this._renderDlBtn();
+    document.getElementById('log-lines').innerHTML = '';
+    this._renderLogCursor();
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    this.ws = new WebSocket(`${proto}//${location.host}/ws/download`);
+
+    this.ws.onopen = () => {
+      const { url, mode, pp, outTpl, rate, subLang, skip } = this.state;
+      this.ws.send(JSON.stringify({
+        url, mode, fmtFlag: this._getFmtFlag(), pp, outTpl, rate, subLang, skip,
+      }));
+    };
+
+    this.ws.onmessage = ({ data }) => {
+      const msg = JSON.parse(data);
+      if (msg.done) {
+        this.state.downloading = false;
+        this._renderDlBtn();
+        this._renderLogCursor();
+        return;
+      }
+      this._appendLog(msg.text, msg.color || '#c9d1d9', !!msg.update);
+    };
+
+    this.ws.onerror = () => {
+      this._appendLog('[error] WebSocket connection failed — is the server running?', '#f85149', false);
+      this.state.downloading = false;
+      this._renderDlBtn();
+      this._renderLogCursor();
+    };
+
+    this.ws.onclose = () => {
+      if (this.state.downloading) {
+        this.state.downloading = false;
+        this._renderDlBtn();
+        this._renderLogCursor();
+      }
+    };
+  }
+
+  // ── Log append ──────────────────────────────────────────────────────────────
+  _appendLog(text, color, update) {
+    const lines = document.getElementById('log-lines');
+    if (update && lines.lastElementChild) {
+      lines.lastElementChild.textContent = text;
+      lines.lastElementChild.style.color = color;
+    } else {
+      const div = document.createElement('div');
+      div.textContent = text;
+      div.style.color = color;
+      div.style.whiteSpace = 'pre-wrap';
+      div.style.wordBreak  = 'break-word';
+      lines.appendChild(div);
+      const cursor = document.getElementById('log-cursor');
+      if (cursor && cursor.querySelector('.idle-cursor')) {
+        cursor.innerHTML = `<div style="color:var(--ac);"><span style="opacity:.6;">$ </span><span class="cursor"></span></div>`;
+      }
+    }
+    const log = document.getElementById('log');
+    if (log) log.scrollTop = log.scrollHeight;
+  }
+}
+
+window.app = new App();
+</script>
+</body>
+</html>
