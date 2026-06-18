@@ -2,19 +2,28 @@
 """yt-dlp Web Downloader — FastAPI backend"""
 
 import asyncio
+import io
 import json
+import re
+import shutil
 import subprocess
 import sys
+import threading
+import uuid
+import zipfile
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 BASE_DIR = Path(__file__).parent
 DOWNLOADS_DIR = BASE_DIR / "downloads"
 DOWNLOADS_DIR.mkdir(exist_ok=True)
+
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
 app = FastAPI(title="yt-dlp Web Downloader")
 
@@ -155,7 +164,7 @@ def _format_info(raw: dict) -> dict:
 
 # ── Download WebSocket ────────────────────────────────────────────────────────
 
-def _build_args(params: dict) -> list:
+def _build_args(params: dict, session_dir: Path) -> list:
     """Build yt-dlp subprocess args from frontend params. Never uses shell=True."""
     # Use the current Python interpreter so venv installs work on all platforms.
     args = [sys.executable, "-m", "yt_dlp", "--newline"]
@@ -194,7 +203,7 @@ def _build_args(params: dict) -> list:
     args.append("--yes-playlist" if params.get("mode") == "playlist" else "--no-playlist")
 
     out_tpl = (params.get("outTpl") or "%(title)s.%(ext)s").strip()
-    args += ["-o", str(DOWNLOADS_DIR / out_tpl)]
+    args += ["-o", str(session_dir / out_tpl)]
 
     url = (params.get("url") or "").strip()
     if url:
@@ -239,7 +248,11 @@ async def ws_download(ws: WebSocket):
         await ws.close()
         return
 
-    args = _build_args(params)
+    session_id = str(uuid.uuid4())
+    session_dir = DOWNLOADS_DIR / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    args = _build_args(params, session_dir)
 
     await ws.send_json({
         "text":   "$ " + _display_args(args),
@@ -247,58 +260,130 @@ async def ws_download(ws: WebSocket):
         "update": False,
     })
 
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        cwd=str(BASE_DIR),
-    )
+    # asyncio.create_subprocess_exec is broken on Windows (NotImplementedError).
+    # Instead: run subprocess.Popen in a background thread, push each output
+    # line into an asyncio.Queue, and drain the queue from the async handler.
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
 
-    buf = b""
+    def _stream():
+        try:
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=str(BASE_DIR),
+            )
+            buf = b""
+            while True:
+                chunk = proc.stdout.read(512)
+                if not chunk:
+                    break
+                buf += chunk
+                while True:
+                    n_pos = buf.find(b"\n")
+                    r_pos = buf.find(b"\r")
+                    if n_pos == -1 and r_pos == -1:
+                        break
+                    if n_pos == -1 or (r_pos != -1 and r_pos < n_pos):
+                        pos, is_cr = r_pos, True
+                    else:
+                        pos, is_cr = n_pos, False
+                    line = buf[:pos].decode("utf-8", errors="replace")
+                    buf = buf[pos + 1:]
+                    stripped = line.strip()
+                    if stripped:
+                        asyncio.run_coroutine_threadsafe(
+                            queue.put({"text": stripped, "color": _line_color(stripped), "update": is_cr}),
+                            loop,
+                        )
+            proc.wait()
+            done_msg: dict = {"done": True, "exitCode": proc.returncode}
+            if proc.returncode == 0:
+                files = sorted(f for f in session_dir.rglob("*") if f.is_file())
+                if len(files) == 1:
+                    done_msg["downloadUrl"] = f"/files/{session_id}/{files[0].name}"
+                elif len(files) > 1:
+                    done_msg["downloadUrl"] = f"/files/{session_id}"
+            asyncio.run_coroutine_threadsafe(queue.put(done_msg), loop)
+        except Exception as exc:
+            asyncio.run_coroutine_threadsafe(
+                queue.put({"text": f"[stream error] {exc}", "color": "#f85149", "update": False, "done": True, "exitCode": 1}),
+                loop,
+            )
+
+    threading.Thread(target=_stream, daemon=True).start()
+
     try:
         while True:
-            chunk = await proc.stdout.read(512)
-            if not chunk:
+            msg = await queue.get()
+            await ws.send_json(msg)
+            if msg.get("done"):
                 break
-            buf += chunk
-            # Split on both \r and \n; \r-only lines are in-place progress updates.
-            while True:
-                n_pos = buf.find(b"\n")
-                r_pos = buf.find(b"\r")
-                if n_pos == -1 and r_pos == -1:
-                    break
-                if n_pos == -1 or (r_pos != -1 and r_pos < n_pos):
-                    pos, is_cr = r_pos, True
-                else:
-                    pos, is_cr = n_pos, False
-                line = buf[:pos].decode("utf-8", errors="replace")
-                buf = buf[pos + 1:]
-                stripped = line.strip()
-                if stripped:
-                    try:
-                        await ws.send_json({
-                            "text":   stripped,
-                            "color":  _line_color(stripped),
-                            "update": is_cr,
-                        })
-                    except Exception:
-                        proc.kill()
-                        return
     except WebSocketDisconnect:
-        proc.kill()
-        return
-    except Exception as exc:
-        try:
-            await ws.send_json({"text": f"[stream error] {exc}", "color": "#f85149", "update": False})
-        except Exception:
-            pass
+        pass
+    except Exception:
+        pass
 
-    await proc.wait()
     try:
-        await ws.send_json({"done": True, "exitCode": proc.returncode})
         await ws.close()
     except Exception:
         pass
+
+
+# ── File serving ─────────────────────────────────────────────────────────────
+
+def _validate_session(session_id: str) -> Path | None:
+    """Return the session dir if it's valid and exists, else None."""
+    if not _UUID_RE.match(session_id):
+        return None
+    p = DOWNLOADS_DIR / session_id
+    return p if p.exists() else None
+
+
+@app.get("/files/{session_id}/{filename}")
+async def serve_file(session_id: str, filename: str):
+    """Serve a single downloaded file then delete its session directory."""
+    session_dir = _validate_session(session_id)
+    if session_dir is None:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+    if "/" in filename or "\\" in filename or filename.startswith("."):
+        return JSONResponse({"error": "Invalid filename"}, status_code=400)
+    path = session_dir / filename
+    if not path.is_file():
+        return JSONResponse({"error": "File not found"}, status_code=404)
+    # Security: confirm path is inside DOWNLOADS_DIR
+    try:
+        path.resolve().relative_to(DOWNLOADS_DIR.resolve())
+    except ValueError:
+        return JSONResponse({"error": "Invalid path"}, status_code=400)
+    return FileResponse(
+        str(path),
+        filename=path.name,
+        background=BackgroundTask(shutil.rmtree, str(session_dir), True),
+    )
+
+
+@app.get("/files/{session_id}")
+async def serve_zip(session_id: str):
+    """Zip all files in a session and serve the archive, then clean up."""
+    session_dir = _validate_session(session_id)
+    if session_dir is None:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+    files = sorted(f for f in session_dir.rglob("*") if f.is_file())
+    if not files:
+        return JSONResponse({"error": "No files in session"}, status_code=404)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        for f in files:
+            zf.write(f, f.relative_to(session_dir))
+    buf.seek(0)
+    shutil.rmtree(str(session_dir), True)  # safe to delete; zip is in memory
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="download.zip"'},
+    )
 
 
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")

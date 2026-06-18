@@ -722,6 +722,12 @@ class App {
         this.state.downloading = false;
         this._renderDlBtn();
         this._renderLogCursor();
+        if (msg.exitCode !== 0) {
+          this._appendLog(`[error] yt-dlp exited with code ${msg.exitCode}`, '#f85149', false);
+        } else if (msg.downloadUrl) {
+          this._appendLog('Done. Saving file to your downloads folder…', 'var(--ac)', false);
+          this._triggerDownload(msg.downloadUrl);
+        }
         return;
       }
       this._appendLog(msg.text, msg.color || '#c9d1d9', !!msg.update);
@@ -741,6 +747,17 @@ class App {
         this._renderLogCursor();
       }
     };
+  }
+
+  // ── Trigger browser download ────────────────────────────────────────────────
+  _triggerDownload(url) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => document.body.removeChild(a), 2000);
   }
 
   // ── Log append ──────────────────────────────────────────────────────────────
