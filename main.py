@@ -52,7 +52,7 @@ async def get_info(req: InfoRequest) -> JSONResponse:
     args = [
         sys.executable, "-m", "yt_dlp",
         "--dump-json", "--no-warnings", "--quiet",
-        "--yes-playlist" if req.mode == "playlist" else "--no-playlist",
+        "--yes-playlist", "--playlist-items", "1",
         url,
     ]
 
@@ -82,16 +82,65 @@ async def get_info(req: InfoRequest) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-def _format_info(raw: dict[str, Any]) -> dict[str, Any]:
-    def fmt_size(b: int | float | None) -> str:
-        if b is None:
-            return "?"
-        for unit in ("B", "KiB", "MiB", "GiB"):
-            if b < 1024:
-                return f"{b:.1f} {unit}"
-            b /= 1024
-        return f"{b:.1f} TiB"
+def _fmt_size(b: int | float | None) -> str:
+    if b is None:
+        return "?"
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if b < 1024:
+            return f"{b:.1f} {unit}"
+        b /= 1024
+    return f"{b:.1f} TiB"
 
+
+def _friendly_heights(formats: list[dict[str, Any]]) -> list[int]:
+    """Return video heights present in the format list, descending."""
+    by_height: dict[int, int] = {}
+    for f in formats:
+        if f.get("vcodec", "none") == "none":
+            continue
+        h: int | None = f.get("height")
+        size = int(f.get("filesize") or f.get("filesize_approx") or 0)
+        if h and (h not in by_height or size > by_height[h]):
+            by_height[h] = size
+    return sorted(by_height.keys(), reverse=True)
+
+
+def _aggregate_sizes(
+    all_fmt_lists: list[list[dict[str, Any]]],
+    target_heights: list[int],
+) -> dict[str, str]:
+    """Sum file sizes across all videos per height bucket and audio track."""
+    height_totals: dict[int, int] = {h: 0 for h in target_heights}
+    audio_total: int = 0
+
+    for fmt_list in all_fmt_lists:
+        by_height: dict[int, int] = {}
+        best_audio: int = 0
+        for f in fmt_list:
+            vcodec: str = f.get("vcodec", "none")
+            h: int | None = f.get("height")
+            size = int(f.get("filesize") or f.get("filesize_approx") or 0)
+            if vcodec == "none":
+                if size > best_audio:
+                    best_audio = size
+            elif h:
+                if h not in by_height or size > by_height[h]:
+                    by_height[h] = size
+
+        for target_h in target_heights:
+            best = max((s for h, s in by_height.items() if h <= target_h), default=0)
+            height_totals[target_h] += best
+        audio_total += best_audio
+
+    result: dict[str, str] = {}
+    for h in target_heights:
+        t = height_totals[h]
+        result[str(h)] = _fmt_size(t) if t > 0 else "?"
+    result["audio"] = _fmt_size(audio_total) if audio_total > 0 else "?"
+    return result
+
+
+def _format_info(raw: dict[str, Any]) -> dict[str, Any]:
     def fmt_views(n: int | None) -> str:
         return f"{n:,} views" if n else "?"
 
@@ -130,7 +179,6 @@ def _format_info(raw: dict[str, Any]) -> dict[str, Any]:
         if tbr:
             parts.append(f"({int(tbr)}k)")
 
-        size: int | float | None = f.get("filesize") or f.get("filesize_approx")
         codec_str = " + ".join(parts[:2])
         if len(parts) > 2:
             codec_str += f"  {parts[2]}"
@@ -140,7 +188,7 @@ def _format_info(raw: dict[str, Any]) -> dict[str, Any]:
             "ext":   f.get("ext", "?"),
             "res":   res,
             "codec": codec_str,
-            "size":  fmt_size(size),
+            "size":  _fmt_size(f.get("filesize") or f.get("filesize_approx")),
         })
 
     thumb: str = raw.get("thumbnail") or ""
@@ -162,6 +210,121 @@ def _format_info(raw: dict[str, Any]) -> dict[str, Any]:
         "playlistCount": playlist_count,
         "playlistTitle": raw.get("playlist_title") or raw.get("playlist") or "",
     }
+
+
+# ── Info WebSocket ────────────────────────────────────────────────────────────
+
+@app.websocket("/ws/info")
+async def ws_info(ws: WebSocket) -> None:
+    await ws.accept()
+    try:
+        data = await ws.receive_json()
+    except Exception:
+        await ws.close()
+        return
+
+    url = (data.get("url") or "").strip()
+    if not url:
+        await ws.send_json({"type": "error", "message": "URL is required"})
+        await ws.close()
+        return
+
+    args = [
+        sys.executable, "-m", "yt_dlp",
+        "--dump-json", "--no-warnings", "--quiet",
+        "--yes-playlist",
+        url,
+    ]
+
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+
+    def _stream() -> None:
+        try:
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(BASE_DIR),
+            )
+            assert proc.stdout is not None
+
+            first_done = False
+            all_fmt_lists: list[list[dict[str, Any]]] = []
+
+            while True:
+                raw_bytes = proc.stdout.readline()
+                if not raw_bytes:
+                    break
+                line = raw_bytes.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                fmt_list: list[dict[str, Any]] = raw.get("formats", [])
+                all_fmt_lists.append(fmt_list)
+
+                if not first_done:
+                    first_done = True
+                    asyncio.run_coroutine_threadsafe(
+                        queue.put({"type": "meta", **_format_info(raw)}),
+                        loop,
+                    )
+                else:
+                    total = raw.get("playlist_count") or raw.get("n_entries")
+                    asyncio.run_coroutine_threadsafe(
+                        queue.put({"type": "progress", "n": len(all_fmt_lists), "total": total}),
+                        loop,
+                    )
+
+            proc.wait()
+
+            if proc.returncode != 0:
+                assert proc.stderr is not None
+                err = proc.stderr.read().decode("utf-8", errors="replace").strip()
+                if not first_done:
+                    asyncio.run_coroutine_threadsafe(
+                        queue.put({"type": "error", "message": err or "yt-dlp failed"}),
+                        loop,
+                    )
+                asyncio.run_coroutine_threadsafe(queue.put({"type": "done"}), loop)
+                return
+
+            if len(all_fmt_lists) > 1:
+                target_heights = _friendly_heights(all_fmt_lists[0])
+                sizes = _aggregate_sizes(all_fmt_lists, target_heights)
+                asyncio.run_coroutine_threadsafe(
+                    queue.put({"type": "sizes", "sizes": sizes}),
+                    loop,
+                )
+
+            asyncio.run_coroutine_threadsafe(queue.put({"type": "done"}), loop)
+        except Exception as exc:
+            asyncio.run_coroutine_threadsafe(
+                queue.put({"type": "error", "message": str(exc)}),
+                loop,
+            )
+
+    threading.Thread(target=_stream, daemon=True).start()
+
+    try:
+        while True:
+            msg = await queue.get()
+            await ws.send_json(msg)
+            if msg.get("type") in ("done", "error"):
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+
+    try:
+        await ws.close()
+    except Exception:
+        pass
 
 
 # ── Download WebSocket ────────────────────────────────────────────────────────

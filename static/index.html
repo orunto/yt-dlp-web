@@ -251,6 +251,7 @@ class App {
     this.state = {
       mode:            'single',
       playlistCount:   null,
+      sizeProgress:    null,   // {n, total} while aggregating playlist sizes
       url:             '',
       fetching:        false,
       fetched:         false,
@@ -476,7 +477,7 @@ class App {
 
   // ── Quality picker ──────────────────────────────────────────────────────────
   _renderQualityPicker() {
-    const { friendlyFormats, selectedQuality, fetched } = this.state;
+    const { friendlyFormats, selectedQuality, fetched, sizeProgress } = this.state;
     const el = document.getElementById('quality-picker');
 
     if (!fetched || !friendlyFormats.length) {
@@ -490,6 +491,13 @@ class App {
         </div>`;
       return;
     }
+
+    const progressBar = sizeProgress
+      ? `<div style="padding:8px 14px;color:#5a5a5a;font-size:11px;border-top:1px solid #131313;display:flex;align-items:center;gap:8px;">
+           <span class="spinner" style="width:10px;height:10px;border-width:1.5px;color:#5a5a5a;"></span>
+           calculating total size… ${sizeProgress.n}/${sizeProgress.total || '?'} videos
+         </div>`
+      : '';
 
     el.innerHTML = `<div style="border:1px solid #1f1f1f;margin-bottom:1px;">` +
       friendlyFormats.map(f => {
@@ -505,9 +513,9 @@ class App {
                          background:${sel ? 'var(--ac)' : 'transparent'};"></span>
             <span style="flex:1;color:${sel ? '#f0f0f0' : '#9a9a9a'};font-size:13px;font-weight:${sel ? '600' : '400'};">${esc(f.label)}</span>
             <span style="color:#5a5a5a;font-size:11px;margin-right:10px;">${esc(f.ext)}</span>
-            <span style="color:${sel ? 'var(--ac)' : '#555'};font-size:12px;min-width:72px;text-align:right;font-weight:${sel?'600':'400'};">${esc(f.size)}</span>
+            <span style="color:${sizeProgress ? '#444' : (sel ? 'var(--ac)' : '#555')};font-size:12px;min-width:72px;text-align:right;font-weight:${sel && !sizeProgress ?'600':'400'};font-style:${sizeProgress ? 'italic' : 'normal'};">${sizeProgress ? 'Calculating…' : esc(f.size)}</span>
           </div>`;
-      }).join('') + `</div>`;
+      }).join('') + progressBar + `</div>`;
   }
 
   // ── Download button ─────────────────────────────────────────────────────────
@@ -516,7 +524,8 @@ class App {
     const ready = fetched && (selectedQuality || customFmt.trim());
 
     const fmt   = friendlyFormats.find(f => f.key === selectedQuality);
-    const sizeStr = (fmt && fmt.size && fmt.size !== '?') ? `  ·  ~${fmt.size}` : '';
+    const sizeStr = (!this.state.sizeProgress && fmt && fmt.size && fmt.size !== '?')
+      ? `  ·  ~${fmt.size}` : '';
 
     const styleDownloading = 'width:100%;display:flex;align-items:center;justify-content:center;gap:10px;background:#1a1a1a;color:#6b6b6b;border:1px solid #262626;font-weight:700;font-size:14px;padding:15px;cursor:wait;letter-spacing:.5px;font-family:inherit;margin-top:1px;';
     const styleReady       = 'width:100%;display:flex;align-items:center;justify-content:center;gap:10px;background:var(--ac);color:var(--on-ac);border:none;font-weight:700;font-size:14px;padding:15px;cursor:pointer;letter-spacing:.5px;font-family:inherit;margin-top:1px;';
@@ -657,43 +666,90 @@ class App {
     return f ? f.fmtFlag : 'bv*+ba/b';
   }
 
-  // ── Fetch video info ────────────────────────────────────────────────────────
-  async fetchInfo() {
+  // ── Fetch video info (streams via WebSocket) ────────────────────────────────
+  fetchInfo() {
     const url = this.state.url.trim();
     if (this.state.fetching || !url) return;
     this.state.fetching = true;
     this._renderFetchBtn();
-    try {
-      const res  = await fetch('/api/info', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, mode: this.state.mode }),
-      });
-      const data = await res.json();
-      if (data.error) {
-        this._appendLog(`[error] ${data.error}`, '#f85149', false);
-      } else {
-        const friendly = this._computeFriendlyFormats(data.formats || []);
-        this.state.meta            = data;
-        this.state.formats         = data.formats || [];
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}/ws/info`);
+
+    ws.onopen = () => ws.send(JSON.stringify({ url }));
+
+    ws.onmessage = ({ data }) => {
+      const msg = JSON.parse(data);
+
+      if (msg.type === 'error') {
+        this._appendLog(`[error] ${msg.message}`, '#f85149', false);
+        this.state.fetching = false;
+        this._renderFetchBtn();
+        return;
+      }
+
+      if (msg.type === 'meta') {
+        const friendly = this._computeFriendlyFormats(msg.formats || []);
+        this.state.meta            = msg;
+        this.state.formats         = msg.formats || [];
         this.state.friendlyFormats = friendly;
         this.state.selectedQuality = friendly.length ? friendly[0].key : null;
         this.state.fetched         = true;
-        // Auto-detect single vs playlist from metadata
-        this.state.playlistCount   = data.playlistCount || null;
-        this.state.mode            = data.isPlaylist ? 'playlist' : 'single';
+        this.state.playlistCount   = msg.playlistCount || null;
+        this.state.mode            = msg.isPlaylist ? 'playlist' : 'single';
+        this.state.sizeProgress    = msg.isPlaylist ? { n: 0, total: msg.playlistCount || null } : null;
+        if (msg.isPlaylist && this.state.outTpl === '%(title)s.%(ext)s') {
+          this.state.outTpl = '%(playlist_index)s - %(title)s.%(ext)s';
+          document.getElementById('out-tpl').value = this.state.outTpl;
+        }
+        // Unblock the UI immediately; WS stays open to stream sizes
+        this.state.fetching = false;
+        this._renderFetchBtn();
         this._renderModeToggle();
         this._renderMetaSec();
         this._renderQualityPicker();
         this._renderDlBtn();
         this._renderCmd();
+        return;
       }
-    } catch (err) {
-      this._appendLog(`[error] ${err.message}`, '#f85149', false);
-    } finally {
-      this.state.fetching = false;
+
+      if (msg.type === 'progress') {
+        this.state.sizeProgress = { n: msg.n, total: msg.total };
+        this._renderQualityPicker();
+        return;
+      }
+
+      if (msg.type === 'sizes') {
+        this.state.sizeProgress = null;
+        for (const fmt of this.state.friendlyFormats) {
+          if (msg.sizes[fmt.key] !== undefined) fmt.size = msg.sizes[fmt.key];
+        }
+        this._renderQualityPicker();
+        this._renderDlBtn();
+        return;
+      }
+
+      if (msg.type === 'done') {
+        this.state.sizeProgress = null;
+        this._renderQualityPicker();
+        ws.close();
+      }
+    };
+
+    ws.onerror = () => {
+      this._appendLog('[error] Info fetch failed — is the server running?', '#f85149', false);
+      this.state.fetching     = false;
+      this.state.sizeProgress = null;
       this._renderFetchBtn();
-    }
+    };
+
+    ws.onclose = () => {
+      if (this.state.fetching) {
+        this.state.fetching = false;
+        this._renderFetchBtn();
+      }
+      this.state.sizeProgress = null;
+    };
   }
 
   // ── Start download ──────────────────────────────────────────────────────────
