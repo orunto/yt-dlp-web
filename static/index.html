@@ -614,8 +614,13 @@ class App {
       const m = f.res.match(/^(\d+)x(\d+)$/);
       if (!m) continue;
       const h = parseInt(m[2]);
-      // yt-dlp lists formats in ascending quality; overwrite keeps the best per height
-      byHeight.set(h, f);
+      const isH264 = f.codec.startsWith('avc');
+      const existing = byHeight.get(h);
+      const existingIsH264 = existing ? existing.codec.startsWith('avc') : false;
+      // Prefer h264; within same codec family keep last (yt-dlp lists ascending quality)
+      if (!existing || (!existingIsH264 && isH264) || (existingIsH264 === isH264)) {
+        byHeight.set(h, f);
+      }
     }
 
     const heights = [...byHeight.keys()].sort((a, b) => b - a);
@@ -626,13 +631,14 @@ class App {
                   : h >= 1080 ? `${h}p  Full HD`
                   : h >= 720  ? `${h}p  HD`
                   :              `${h}p`;
-      return { key: String(h), label, ext: f.ext, size: f.size, fmtFlag: `bv*[height<=${h}]+ba/b` };
+      return { key: String(h), label, ext: 'mp4', size: f.size, sortSpec: `vcodec:h264,fps,res:${h},acodec:m4a` };
     });
 
-    // Best audio: prefer m4a, then anything
-    const bestAudio = audioOnly.find(f => f.ext === 'm4a') || audioOnly[0];
+    // Best audio: prefer best m4a (last in ascending list), fallback to last overall
+    const m4aAudio = audioOnly.filter(f => f.ext === 'm4a');
+    const bestAudio = m4aAudio.length ? m4aAudio[m4aAudio.length - 1] : audioOnly[audioOnly.length - 1];
     if (bestAudio) {
-      result.push({ key: 'audio', label: 'Audio only', ext: bestAudio.ext, size: bestAudio.size, fmtFlag: 'ba/b' });
+      result.push({ key: 'audio', label: 'Audio only', ext: 'm4a', size: bestAudio.size, fmtFlag: 'ba[ext=m4a]/ba' });
     }
     return result;
   }
@@ -641,7 +647,13 @@ class App {
   _buildCommand() {
     const s = this.state;
     const parts = ['yt-dlp'];
-    parts.push(`-f "${this._getFmtFlag()}"`);
+    const fp = this._getFormatParams();
+    if (fp.sortSpec) {
+      parts.push(`-S "${fp.sortSpec}"`);
+      parts.push('--merge-output-format mp4');
+    } else {
+      parts.push(`-f "${fp.fmtFlag || 'bv*+ba/b'}"`);
+    }
     const { pp } = s;
     if (pp.extractAudio) parts.push('-x');
     if (pp.mp3)          parts.push('--audio-format mp3');
@@ -659,11 +671,13 @@ class App {
     return parts.join(' ');
   }
 
-  _getFmtFlag() {
+  _getFormatParams() {
     const { selectedQuality, friendlyFormats, customFmt } = this.state;
-    if (customFmt.trim()) return customFmt.trim();
+    if (customFmt.trim()) return { fmtFlag: customFmt.trim() };
     const f = friendlyFormats.find(f => f.key === selectedQuality);
-    return f ? f.fmtFlag : 'bv*+ba/b';
+    if (!f) return { sortSpec: 'vcodec:h264,fps,acodec:m4a' };
+    if (f.sortSpec) return { sortSpec: f.sortSpec };
+    return { fmtFlag: f.fmtFlag || 'bv*+ba/b' };
   }
 
   // ── Fetch video info (streams via WebSocket) ────────────────────────────────
@@ -768,7 +782,7 @@ class App {
     this.ws.onopen = () => {
       const { url, mode, pp, outTpl, rate, subLang, skip } = this.state;
       this.ws.send(JSON.stringify({
-        url, mode, fmtFlag: this._getFmtFlag(), pp, outTpl, rate, subLang, skip,
+        url, mode, ...this._getFormatParams(), pp, outTpl, rate, subLang, skip,
       }));
     };
 

@@ -109,28 +109,39 @@ def _aggregate_sizes(
     all_fmt_lists: list[list[dict[str, Any]]],
     target_heights: list[int],
 ) -> dict[str, str]:
-    """Sum file sizes across all videos per height bucket and audio track."""
+    """Sum file sizes across all videos, preferring h264 video + m4a audio to match download strategy."""
     height_totals: dict[int, int] = {h: 0 for h in target_heights}
     audio_total: int = 0
 
     for fmt_list in all_fmt_lists:
-        by_height: dict[int, int] = {}
+        by_h264:  dict[int, int] = {}  # h264 video streams
+        by_any:   dict[int, int] = {}  # any video stream (fallback)
+        best_m4a:   int = 0
         best_audio: int = 0
+
         for f in fmt_list:
             vcodec: str = f.get("vcodec", "none")
+            acodec: str = f.get("acodec", "none") or ""
             h: int | None = f.get("height")
             size = int(f.get("filesize") or f.get("filesize_approx") or 0)
+
             if vcodec == "none":
-                if size > best_audio:
-                    best_audio = size
+                if f.get("ext") == "m4a" or acodec.startswith("mp4a"):
+                    best_m4a = max(best_m4a, size)
+                best_audio = max(best_audio, size)
             elif h:
-                if h not in by_height or size > by_height[h]:
-                    by_height[h] = size
+                if vcodec.startswith("avc"):
+                    by_h264[h] = max(by_h264.get(h, 0), size)
+                by_any[h] = max(by_any.get(h, 0), size)
+
+        aud = best_m4a if best_m4a > 0 else best_audio
+        audio_total += aud
 
         for target_h in target_heights:
-            best = max((s for h, s in by_height.items() if h <= target_h), default=0)
-            height_totals[target_h] += best
-        audio_total += best_audio
+            vid = max((s for hh, s in by_h264.items() if hh <= target_h), default=0)
+            if vid == 0:
+                vid = max((s for hh, s in by_any.items() if hh <= target_h), default=0)
+            height_totals[target_h] += vid
 
     result: dict[str, str] = {}
     for h in target_heights:
@@ -334,8 +345,17 @@ def _build_args(params: dict[str, Any], session_dir: Path) -> list[str]:
     # Use the current Python interpreter so venv installs work on all platforms.
     args: list[str] = [sys.executable, "-m", "yt_dlp", "--newline"]
 
-    fmt_flag = (params.get("fmtFlag") or "bv*+ba/b").strip()
-    args += ["-f", fmt_flag]
+    sort_spec = (params.get("sortSpec") or "").strip()
+    fmt_flag  = (params.get("fmtFlag")  or "").strip()
+
+    if sort_spec:
+        args += ["-S", sort_spec]
+        args += ["--merge-output-format", "mp4"]
+    elif fmt_flag:
+        args += ["-f", fmt_flag]
+    else:
+        args += ["-S", "vcodec:h264,fps,acodec:m4a"]
+        args += ["--merge-output-format", "mp4"]
 
     pp: dict[str, Any] = params.get("pp", {})
     if pp.get("extractAudio"):
