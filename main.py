@@ -344,7 +344,7 @@ def _validate_session(session_id: str) -> Path | None:
     return p if p.exists() else None
 
 
-@app.get("/files/{session_id}/{filename}")
+@app.get("/files/{session_id}/{filename}", response_model=None)
 async def serve_file(session_id: str, filename: str) -> FileResponse | JSONResponse:
     """Serve a single downloaded file then delete its session directory."""
     session_dir = _validate_session(session_id)
@@ -367,7 +367,7 @@ async def serve_file(session_id: str, filename: str) -> FileResponse | JSONRespo
     )
 
 
-@app.get("/files/{session_id}")
+@app.get("/files/{session_id}", response_model=None)
 async def serve_zip(session_id: str) -> StreamingResponse | JSONResponse:
     """Zip all files in a session and serve the archive, then clean up."""
     session_dir = _validate_session(session_id)
