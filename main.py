@@ -12,6 +12,7 @@ import threading
 import uuid
 import zipfile
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -31,7 +32,7 @@ app = FastAPI(title="yt-dlp Web Downloader")
 # ── Static / root ────────────────────────────────────────────────────────────
 
 @app.get("/")
-async def root():
+async def root() -> FileResponse:
     return FileResponse(BASE_DIR / "static" / "index.html")
 
 
@@ -43,7 +44,7 @@ class InfoRequest(BaseModel):
 
 
 @app.post("/api/info")
-async def get_info(req: InfoRequest):
+async def get_info(req: InfoRequest) -> JSONResponse:
     url = req.url.strip()
     if not url:
         return JSONResponse({"error": "URL is required"}, status_code=400)
@@ -72,7 +73,7 @@ async def get_info(req: InfoRequest):
 
         # --dump-json writes one JSON object per line; grab the first.
         first_line = result.stdout.split(b"\n")[0].strip()
-        raw = json.loads(first_line)
+        raw: dict[str, Any] = json.loads(first_line)
         return JSONResponse(_format_info(raw))
 
     except subprocess.TimeoutExpired:
@@ -81,8 +82,8 @@ async def get_info(req: InfoRequest):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-def _format_info(raw: dict) -> dict:
-    def fmt_size(b):
+def _format_info(raw: dict[str, Any]) -> dict[str, Any]:
+    def fmt_size(b: int | float | None) -> str:
         if b is None:
             return "?"
         for unit in ("B", "KiB", "MiB", "GiB"):
@@ -91,26 +92,27 @@ def _format_info(raw: dict) -> dict:
             b /= 1024
         return f"{b:.1f} TiB"
 
-    def fmt_views(n):
+    def fmt_views(n: int | None) -> str:
         return f"{n:,} views" if n else "?"
 
-    def fmt_date(d):
+    def fmt_date(d: str | None) -> str:
         if not d or len(d) < 8:
             return d or "?"
         return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
 
-    def fmt_duration(sec):
+    def fmt_duration(sec: int | float | None) -> str:
         if not sec:
             return "?"
-        sec = int(sec)
-        h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
-        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+        s = int(sec)
+        h, m, r = s // 3600, (s % 3600) // 60, s % 60
+        return f"{h}:{m:02d}:{r:02d}" if h else f"{m}:{r:02d}"
 
-    formats = []
+    formats: list[dict[str, Any]] = []
     for f in raw.get("formats", []):
-        vcodec = f.get("vcodec", "none")
-        acodec = f.get("acodec", "none")
-        h_px, w_px = f.get("height"), f.get("width")
+        vcodec: str = f.get("vcodec", "none")
+        acodec: str = f.get("acodec", "none")
+        h_px: int | None = f.get("height")
+        w_px: int | None = f.get("width")
 
         if vcodec == "none":
             res = "audio only"
@@ -119,33 +121,33 @@ def _format_info(raw: dict) -> dict:
         else:
             res = "?"
 
-        parts = []
+        parts: list[str] = []
         if vcodec and vcodec != "none":
             parts.append(vcodec)
         if acodec and acodec != "none":
             parts.append(acodec)
-        tbr = f.get("tbr") or f.get("abr") or f.get("vbr")
+        tbr: float | None = f.get("tbr") or f.get("abr") or f.get("vbr")
         if tbr:
             parts.append(f"({int(tbr)}k)")
 
-        size = f.get("filesize") or f.get("filesize_approx")
+        size: int | float | None = f.get("filesize") or f.get("filesize_approx")
         codec_str = " + ".join(parts[:2])
         if len(parts) > 2:
             codec_str += f"  {parts[2]}"
 
         formats.append({
-            "code": f.get("format_id", "?"),
-            "ext":  f.get("ext", "?"),
-            "res":  res,
+            "code":  f.get("format_id", "?"),
+            "ext":   f.get("ext", "?"),
+            "res":   res,
             "codec": codec_str,
             "size":  fmt_size(size),
         })
 
-    thumb = raw.get("thumbnail") or ""
+    thumb: str = raw.get("thumbnail") or ""
     if not thumb and raw.get("thumbnails"):
         thumb = raw["thumbnails"][-1].get("url", "")
 
-    playlist_count = raw.get("playlist_count") or raw.get("n_entries")
+    playlist_count: int | None = raw.get("playlist_count") or raw.get("n_entries")
 
     return {
         "id":            raw.get("id", ""),
@@ -164,15 +166,15 @@ def _format_info(raw: dict) -> dict:
 
 # ── Download WebSocket ────────────────────────────────────────────────────────
 
-def _build_args(params: dict, session_dir: Path) -> list:
+def _build_args(params: dict[str, Any], session_dir: Path) -> list[str]:
     """Build yt-dlp subprocess args from frontend params. Never uses shell=True."""
     # Use the current Python interpreter so venv installs work on all platforms.
-    args = [sys.executable, "-m", "yt_dlp", "--newline"]
+    args: list[str] = [sys.executable, "-m", "yt_dlp", "--newline"]
 
     fmt_flag = (params.get("fmtFlag") or "bv*+ba/b").strip()
     args += ["-f", fmt_flag]
 
-    pp = params.get("pp", {})
+    pp: dict[str, Any] = params.get("pp", {})
     if pp.get("extractAudio"):
         args.append("-x")
     if pp.get("mp3"):
@@ -212,11 +214,11 @@ def _build_args(params: dict, session_dir: Path) -> list:
     return args
 
 
-def _display_args(args: list) -> str:
+def _display_args(args: list[str]) -> str:
     """Build a human-readable command string from the full arg list."""
     # args[0..2] = python -m yt_dlp — show as 'yt-dlp' instead
     display = ["yt-dlp"] + args[3:]
-    parts = []
+    parts: list[str] = []
     for a in display:
         if " " in a or any(c in a for c in "%()*&|<>!"):
             parts.append(f'"{a}"')
@@ -240,10 +242,10 @@ def _line_color(line: str) -> str:
 
 
 @app.websocket("/ws/download")
-async def ws_download(ws: WebSocket):
+async def ws_download(ws: WebSocket) -> None:
     await ws.accept()
     try:
-        params = await ws.receive_json()
+        params: dict[str, Any] = await ws.receive_json()
     except Exception:
         await ws.close()
         return
@@ -263,10 +265,10 @@ async def ws_download(ws: WebSocket):
     # asyncio.create_subprocess_exec is broken on Windows (NotImplementedError).
     # Instead: run subprocess.Popen in a background thread, push each output
     # line into an asyncio.Queue, and drain the queue from the async handler.
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     loop = asyncio.get_event_loop()
 
-    def _stream():
+    def _stream() -> None:
         try:
             proc = subprocess.Popen(
                 args,
@@ -274,6 +276,7 @@ async def ws_download(ws: WebSocket):
                 stderr=subprocess.STDOUT,
                 cwd=str(BASE_DIR),
             )
+            assert proc.stdout is not None
             buf = b""
             while True:
                 chunk = proc.stdout.read(512)
@@ -298,7 +301,7 @@ async def ws_download(ws: WebSocket):
                             loop,
                         )
             proc.wait()
-            done_msg: dict = {"done": True, "exitCode": proc.returncode}
+            done_msg: dict[str, Any] = {"done": True, "exitCode": proc.returncode}
             if proc.returncode == 0:
                 files = sorted(f for f in session_dir.rglob("*") if f.is_file())
                 if len(files) == 1:
@@ -342,7 +345,7 @@ def _validate_session(session_id: str) -> Path | None:
 
 
 @app.get("/files/{session_id}/{filename}")
-async def serve_file(session_id: str, filename: str):
+async def serve_file(session_id: str, filename: str) -> FileResponse | JSONResponse:
     """Serve a single downloaded file then delete its session directory."""
     session_dir = _validate_session(session_id)
     if session_dir is None:
@@ -365,7 +368,7 @@ async def serve_file(session_id: str, filename: str):
 
 
 @app.get("/files/{session_id}")
-async def serve_zip(session_id: str):
+async def serve_zip(session_id: str) -> StreamingResponse | JSONResponse:
     """Zip all files in a session and serve the archive, then clean up."""
     session_dir = _validate_session(session_id)
     if session_dir is None:
