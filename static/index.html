@@ -56,6 +56,16 @@
     }
     .chip:hover { border-color: var(--ac); color: var(--ac); }
     button { cursor: pointer; }
+    .meta-card { display: flex; gap: 16px; align-items: flex-start; }
+    .meta-thumb { flex: none; width: 240px; height: 135px; }
+    .meta-info  { flex: 1; min-width: 0; }
+    @media (max-width: 540px) {
+      .meta-card  { flex-direction: column; }
+      .meta-thumb { width: 100%; height: auto; aspect-ratio: 16/9; }
+      .meta-thumb img { width: 100% !important; height: 100% !important; }
+      .title-bar  { flex-direction: column; align-items: flex-start !important; gap: 10px !important; }
+      .title-bar .title-right { margin-left: 0 !important; }
+    }
   </style>
 </head>
 <body>
@@ -63,16 +73,18 @@
 <div style="max-width:980px;margin:0 auto;">
 
   <!-- Title bar -->
-  <div style="display:flex;align-items:center;gap:10px;border:1px solid #1f1f1f;background:#0d0d0d;padding:10px 14px;">
-    <div style="display:flex;gap:7px;align-items:center;">
-      <span style="width:11px;height:11px;background:#2a2a2a;display:block;"></span>
-      <span style="width:11px;height:11px;background:#2a2a2a;display:block;"></span>
-      <span style="width:11px;height:11px;background:var(--ac);display:block;"></span>
+  <div class="title-bar" style="display:flex;align-items:center;gap:10px;border:1px solid #1f1f1f;background:#0d0d0d;padding:10px 14px;">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <div style="display:flex;gap:7px;align-items:center;">
+        <span style="width:11px;height:11px;background:#2a2a2a;display:block;"></span>
+        <span style="width:11px;height:11px;background:#2a2a2a;display:block;"></span>
+        <span style="width:11px;height:11px;background:var(--ac);display:block;"></span>
+      </div>
+      <span style="color:var(--ac);font-weight:700;letter-spacing:.5px;">yt-dlp</span>
+      <span style="color:#4d4d4d;">/</span>
+      <span style="color:#6b6b6b;">web downloader</span>
     </div>
-    <span style="color:var(--ac);font-weight:700;letter-spacing:.5px;">yt-dlp</span>
-    <span style="color:#4d4d4d;">/</span>
-    <span style="color:#6b6b6b;">web downloader</span>
-    <span style="margin-left:auto;display:flex;align-items:center;gap:14px;">
+    <span class="title-right" style="margin-left:auto;display:flex;align-items:center;gap:14px;">
       <span id="accent-picker" style="display:flex;gap:6px;align-items:center;"></span>
       <span style="color:#3d3d3d;font-size:11px;letter-spacing:.5px;">yt-dlp · python 3.x</span>
     </span>
@@ -429,7 +441,7 @@ class App {
     const { meta, formats, formatsOpen } = this.state;
     if (!meta) return;
     const thumbHtml = meta.thumbnail
-      ? `<img src="${esc(meta.thumbnail)}" alt="" style="width:240px;height:135px;object-fit:cover;display:block;">`
+      ? `<img src="${esc(meta.thumbnail)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">`
       : `<div style="display:flex;align-items:center;justify-content:center;height:100%;"><span style="color:#3d3d3d;font-size:11px;letter-spacing:1px;">[ thumbnail ]</span></div>`;
     const fmtRows = formatsOpen ? `
       <div style="border-top:1px solid #1f1f1f;overflow-x:auto;">
@@ -448,12 +460,12 @@ class App {
         </div>
       </div>` : '';
     document.getElementById('meta-content').innerHTML = `
-      <div style="display:flex;gap:16px;align-items:flex-start;">
-        <div style="flex:none;width:240px;height:135px;border:1px solid #262626;position:relative;background-color:#0a0a0a;background-image:repeating-linear-gradient(45deg,#121212 0,#121212 8px,#0d0d0d 8px,#0d0d0d 16px);overflow:hidden;">
+      <div class="meta-card">
+        <div class="meta-thumb" style="border:1px solid #262626;position:relative;background-color:#0a0a0a;background-image:repeating-linear-gradient(45deg,#121212 0,#121212 8px,#0d0d0d 8px,#0d0d0d 16px);overflow:hidden;">
           ${thumbHtml}
           <span style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.8);color:#ccc;font-size:11px;padding:1px 5px;">${esc(meta.duration)}</span>
         </div>
-        <div style="flex:1;min-width:0;">
+        <div class="meta-info">
           <div style="color:#f0f0f0;font-size:16px;font-weight:600;line-height:1.4;margin-bottom:10px;">${esc(meta.title)}</div>
           <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:12px;">
             <span style="color:#5a5a5a;">uploader</span><span style="color:#c9d1d9;">${esc(meta.uploader)}</span>
@@ -788,6 +800,11 @@ class App {
 
     this.ws.onmessage = ({ data }) => {
       const msg = JSON.parse(data);
+      if (msg.partialUrl) {
+        this._appendLog(`↓ saving: ${msg.filename}`, 'var(--ac)', false);
+        this._triggerDownload(msg.partialUrl);
+        return;
+      }
       if (msg.done) {
         this.state.downloading = false;
         this._renderDlBtn();
@@ -797,6 +814,8 @@ class App {
         } else if (msg.downloadUrl) {
           this._appendLog('Done. Saving file to your downloads folder…', 'var(--ac)', false);
           this._triggerDownload(msg.downloadUrl);
+        } else if (this.state.mode === 'playlist') {
+          this._appendLog('All videos sent to your downloads folder.', 'var(--ac)', false);
         }
         return;
       }

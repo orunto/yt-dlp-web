@@ -13,6 +13,7 @@ import uuid
 import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -24,7 +25,10 @@ BASE_DIR = Path(__file__).parent
 DOWNLOADS_DIR = BASE_DIR / "downloads"
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 
-_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+MAX_DOWNLOAD_BYTES = 30 * 1024 ** 3  # 30 GiB hard cap for the downloads directory
+
+_UUID_RE  = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+_PART_RE  = re.compile(r'\.f\d+\.')   # yt-dlp temp stream files e.g. video.f137.mp4
 
 app = FastAPI(title="yt-dlp Web Downloader")
 
@@ -433,6 +437,30 @@ async def ws_download(ws: WebSocket) -> None:
         await ws.close()
         return
 
+    # ── Disk-space queue ──────────────────────────────────────────────────────
+    # Hold the connection open until the downloads directory is under the cap.
+    # Files are deleted as they are served, so space frees up continuously.
+    _rloop = asyncio.get_running_loop()
+    _queued = False
+    while True:
+        used = await _rloop.run_in_executor(None, _downloads_used_bytes)
+        if used < MAX_DOWNLOAD_BYTES:
+            break
+        if not _queued:
+            await ws.send_json({
+                "text":   "Download queued — server storage is at capacity. Will start automatically when space frees up.",
+                "color":  "#e0a93c",
+                "update": False,
+            })
+            _queued = True
+        await asyncio.sleep(8)
+    if _queued:
+        await ws.send_json({
+            "text":   "Space available — starting download now.",
+            "color":  "var(--ac)",
+            "update": False,
+        })
+
     session_id = str(uuid.uuid4())
     session_dir = DOWNLOADS_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -450,6 +478,28 @@ async def ws_download(ws: WebSocket) -> None:
     # line into an asyncio.Queue, and drain the queue from the async handler.
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     loop = asyncio.get_event_loop()
+
+    is_playlist = params.get("mode") == "playlist"
+    seen_files: set[str] = set()
+
+    def _send_new_files() -> None:
+        """Glob session dir for newly completed files and push a partialUrl for each."""
+        try:
+            current = {
+                f.name for f in session_dir.iterdir()
+                if f.is_file()
+                and not f.name.endswith(".part")
+                and not f.name.endswith(".ytdl")
+                and not _PART_RE.search(f.name)
+            }
+            for name in sorted(current - seen_files):
+                seen_files.add(name)
+                asyncio.run_coroutine_threadsafe(
+                    queue.put({"partialUrl": f"/files/{session_id}/{quote(name)}", "filename": name}),
+                    loop,
+                )
+        except Exception:
+            pass
 
     def _stream() -> None:
         try:
@@ -479,13 +529,18 @@ async def ws_download(ws: WebSocket) -> None:
                     buf = buf[pos + 1:]
                     stripped = line.strip()
                     if stripped:
+                        # Each "Downloading item N" line means item N-1 is fully done
+                        if is_playlist and "[download] Downloading item" in stripped:
+                            _send_new_files()
                         asyncio.run_coroutine_threadsafe(
                             queue.put({"text": stripped, "color": _line_color(stripped), "update": is_cr}),
                             loop,
                         )
             proc.wait()
+            if is_playlist:
+                _send_new_files()  # catch the last video
             done_msg: dict[str, Any] = {"done": True, "exitCode": proc.returncode}
-            if proc.returncode == 0:
+            if proc.returncode == 0 and not is_playlist:
                 files = sorted(f for f in session_dir.rglob("*") if f.is_file())
                 if len(files) == 1:
                     done_msg["downloadUrl"] = f"/files/{session_id}/{files[0].name}"
@@ -527,6 +582,34 @@ def _validate_session(session_id: str) -> Path | None:
     return p if p.exists() else None
 
 
+def _downloads_used_bytes() -> int:
+    """Sum the size of every file currently in the downloads directory."""
+    total = 0
+    try:
+        for f in DOWNLOADS_DIR.rglob("*"):
+            if f.is_file():
+                try:
+                    total += f.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _cleanup_file(file_path: Path, session_dir: Path) -> None:
+    """Delete a served file; remove the session dir once it's empty."""
+    try:
+        file_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        if not any(session_dir.iterdir()):
+            shutil.rmtree(str(session_dir), ignore_errors=True)
+    except Exception:
+        pass
+
+
 @app.get("/files/{session_id}/{filename}", response_model=None)
 async def serve_file(session_id: str, filename: str) -> FileResponse | JSONResponse:
     """Serve a single downloaded file then delete its session directory."""
@@ -546,7 +629,7 @@ async def serve_file(session_id: str, filename: str) -> FileResponse | JSONRespo
     return FileResponse(
         str(path),
         filename=path.name,
-        background=BackgroundTask(shutil.rmtree, str(session_dir), True),
+        background=BackgroundTask(_cleanup_file, path, session_dir),
     )
 
 
