@@ -11,7 +11,7 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; background: #0a0a0a; }
-    :root { --ac: #ff0033; --on-ac: #ffffff; --amber: #e0a93c; }
+    :root { --ac: #e8445a; --on-ac: #ffffff; --amber: #e0a93c; }
     ::selection { background: rgba(255,0,51,.28); }
     body {
       font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -109,7 +109,7 @@
             onkeydown="if(event.key==='Enter')app.fetchInfo()">
         </div>
         <button id="fetch-btn" onclick="app.fetchInfo()"
-          style="flex:none;display:flex;align-items:center;gap:8px;background:var(--ac);color:var(--on-ac);border:none;font-weight:700;font-size:13px;padding:0 22px;cursor:pointer;letter-spacing:.3px;font-family:inherit;">
+          style="flex:none;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--ac);color:var(--on-ac);border:none;font-weight:700;font-size:13px;padding:0 22px;cursor:pointer;letter-spacing:.3px;font-family:inherit;">
         </button>
       </div>
     </div>
@@ -427,8 +427,14 @@ class App {
   // ── Fetch button ────────────────────────────────────────────────────────────
   _renderFetchBtn() {
     const el = document.getElementById('fetch-btn');
-    el.innerHTML  = this.state.fetching ? `<span class="spinner"></span> Fetching…` : 'Fetch Info';
-    el.disabled   = this.state.fetching;
+    if (this.state.fetching) {
+      el.style.width = el.offsetWidth + 'px';
+      el.innerHTML   = `<span class="spinner"></span>`;
+    } else {
+      el.style.width = '';
+      el.innerHTML   = 'Fetch Info';
+    }
+    el.disabled = this.state.fetching;
   }
 
   // ── Metadata section ────────────────────────────────────────────────────────
@@ -596,10 +602,40 @@ class App {
       </button>`;
   }
 
+  // ── Command syntax highlighter ─────────────────────────────────────────────
+  _colorizeCmd(cmd) {
+    const BOOL_FLAGS = new Set([
+      '-x', '--embed-thumbnail', '--embed-subs', '--embed-metadata',
+      '--split-chapters', '--yes-playlist', '--no-playlist',
+    ]);
+    const tokens = [...cmd.matchAll(/("(?:[^"\\]|\\.)*"|\S+)/g)].map(m => m[1]);
+    let expectValue = false;
+    return tokens.map((tok, i) => {
+      const safe = esc(tok);
+      let color;
+      if (i === 0) {
+        color = '#e6edf3';
+        expectValue = false;
+      } else if (tok.includes('://')) {
+        color = '#7ee787';
+        expectValue = false;
+      } else if (tok.startsWith('-')) {
+        color = '#79c0ff';
+        expectValue = !BOOL_FLAGS.has(tok);
+      } else if (expectValue) {
+        color = tok.includes('%(') ? '#7ee787' : '#ffa657';
+        expectValue = false;
+      } else {
+        color = '#c9d1d9';
+      }
+      return `<span style="color:${color}">${safe}</span>`;
+    }).join(' ');
+  }
+
   // ── Command preview ─────────────────────────────────────────────────────────
   _renderCmd() {
     const el = document.getElementById('cmd-preview');
-    if (el) el.textContent = this._buildCommand();
+    if (el) el.innerHTML = this._colorizeCmd(this._buildCommand());
   }
 
   // ── Chip insert buttons ─────────────────────────────────────────────────────
@@ -858,10 +894,14 @@ class App {
       lines.lastElementChild.style.color = color;
     } else {
       const div = document.createElement('div');
-      div.textContent = text;
-      div.style.color = color;
       div.style.whiteSpace = 'pre-wrap';
       div.style.wordBreak  = 'break-word';
+      if (text.startsWith('$ ')) {
+        div.innerHTML = `<span style="color:var(--ac);opacity:.6;">$ </span>${this._colorizeCmd(text.slice(2))}`;
+      } else {
+        div.textContent = text;
+        div.style.color = color;
+      }
       lines.appendChild(div);
       const cursor = document.getElementById('log-cursor');
       if (cursor && cursor.querySelector('.idle-cursor')) {
