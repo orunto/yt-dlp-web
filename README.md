@@ -7,6 +7,8 @@ A browser-based interface for [yt-dlp][https://github.com/yt-dlp/yt-dlp]. Paste 
 - Fetches video metadata (title, uploader, duration, available formats) before you commit to a download
 - Detects automatically whether a URL is a single video or a playlist and sets the mode accordingly
 - Streams yt-dlp's real output to the browser in real time so you can see exactly what is happening
+- Pipes single-stream formats directly to the browser so the file lands in your Downloads folder without first buffering to the server
+- Shows a toast while the download is being prepared and lets you cancel it at any time
 - Keeps advanced options (post-processing, output templates, rate limiting, subtitles) out of the way until you need them
 
 ## Requirements
@@ -48,13 +50,16 @@ uvicorn main:app --reload
 
 ```
 ytdlp-web/
-├── main.py          # FastAPI backend — info endpoint, download WebSocket
+├── main.py            # FastAPI backend — info, download WebSocket, direct stream
 ├── static/
-│   ├──index.html   # Frontend — all HTML, CSS, and JS in one file
-│   └──favicon.ico  # yt-dlp icon 
-├── start.py         # Convenience launcher
+│   ├── index.html     # Frontend — all HTML, CSS, and JS in one file
+│   ├── favicon.ico    # yt-dlp icon
+│   └── favicon.png    # yt-dlp icon (PNG variant)
+├── start.py           # Convenience launcher
 ├── requirements.txt
-└── downloads/       # Created automatically on first run
+├── CONTRIBUTING.md
+├── CODE_OF_CONDUCT.md
+└── downloads/         # Created automatically on first run
 ```
 
 ## Downloaded files
