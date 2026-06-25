@@ -1,6 +1,6 @@
 # yt-dlp web downloader
 
-A browser-based interface for yt-dlp. Paste a URL, pick a quality, download. No Electron, no build step — just Python and a single HTML file.
+A browser-based interface for [yt-dlp][https://github.com/yt-dlp/yt-dlp]. Paste a URL, pick a quality, download. No Electron, no build step — just Python and a single HTML file.
 
 ## What it does
 
@@ -50,7 +50,8 @@ uvicorn main:app --reload
 ytdlp-web/
 ├── main.py          # FastAPI backend — info endpoint, download WebSocket
 ├── static/
-│   └── index.html   # Frontend — all HTML, CSS, and JS in one file
+│   ├──index.html   # Frontend — all HTML, CSS, and JS in one file
+│   └──favicon.ico  # yt-dlp icon 
 ├── start.py         # Convenience launcher
 ├── requirements.txt
 └── downloads/       # Created automatically on first run
