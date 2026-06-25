@@ -97,16 +97,62 @@ def _fmt_size(b: int | float | None) -> str:
 
 
 def _friendly_heights(formats: list[dict[str, Any]]) -> list[int]:
-    """Return video heights present in the format list, descending."""
-    by_height: dict[int, int] = {}
+    """Return video min-dimensions present in the format list, descending."""
+    by_res: dict[int, int] = {}
     for f in formats:
         if f.get("vcodec", "none") == "none":
             continue
         h: int | None = f.get("height")
-        size = int(f.get("filesize") or f.get("filesize_approx") or 0)
-        if h and (h not in by_height or size > by_height[h]):
-            by_height[h] = size
-    return sorted(by_height.keys(), reverse=True)
+        w: int | None = f.get("width")
+        if not h or not w:
+            continue
+        res_key = min(h, w)
+        size = int(f.get("filesize") or 0)
+        if res_key not in by_res or size > by_res[res_key]:
+            by_res[res_key] = size
+    return sorted(by_res.keys(), reverse=True)
+
+
+def _friendly_combined_sizes(fmt_list: list[dict[str, Any]]) -> dict[str, str]:
+    """Per-resolution combined size: best video-only stream + best m4a audio, keyed by min(w,h)."""
+    # (size, is_h264, is_video_only)
+    by_res: dict[int, tuple[int, bool, bool]] = {}
+    best_m4a: int = 0
+    best_audio: int = 0
+
+    for f in fmt_list:
+        vcodec: str = f.get("vcodec", "none")
+        acodec: str = (f.get("acodec") or "none")
+        h: int | None = f.get("height")
+        w: int | None = f.get("width")
+        size = int(f.get("filesize") or 0)
+
+        if vcodec == "none":
+            if f.get("ext") == "m4a" or acodec.startswith("mp4a"):
+                best_m4a = max(best_m4a, size)
+            best_audio = max(best_audio, size)
+        elif h and w and size > 0:
+            is_vo   = acodec == "none"   # video-only (DASH), not muxed
+            is_h264 = vcodec.startswith("avc")
+            res_key = min(h, w)
+            existing = by_res.get(res_key)
+            if existing is None:
+                by_res[res_key] = (size, is_h264, is_vo)
+            else:
+                ex_size, ex_h264, ex_vo = existing
+                # Prefer video-only over muxed, then h264 over other codecs, then larger size
+                if (not ex_vo and is_vo) or \
+                   (ex_vo == is_vo and not ex_h264 and is_h264) or \
+                   (ex_vo == is_vo and ex_h264 == is_h264 and size > ex_size):
+                    by_res[res_key] = (size, is_h264, is_vo)
+
+    aud = best_m4a if best_m4a > 0 else best_audio
+    result: dict[str, str] = {}
+    for res_key, (vid_size, _, _) in by_res.items():
+        total = vid_size + aud
+        result[str(res_key)] = _fmt_size(total) if total > 0 else "?"
+    result["audio"] = _fmt_size(aud) if aud > 0 else "?"
+    return result
 
 
 def _aggregate_sizes(
@@ -127,7 +173,7 @@ def _aggregate_sizes(
             vcodec: str = f.get("vcodec", "none")
             acodec: str = f.get("acodec", "none") or ""
             h: int | None = f.get("height")
-            size = int(f.get("filesize") or f.get("filesize_approx") or 0)
+            size = int(f.get("filesize") or 0)
 
             if vcodec == "none":
                 if f.get("ext") == "m4a" or acodec.startswith("mp4a"):
@@ -203,7 +249,8 @@ def _format_info(raw: dict[str, Any]) -> dict[str, Any]:
             "ext":   f.get("ext", "?"),
             "res":   res,
             "codec": codec_str,
-            "size":  _fmt_size(f.get("filesize") or f.get("filesize_approx")),
+            "size":  _fmt_size(f.get("filesize")),
+            "muxed": vcodec != "none" and acodec not in ("none", None, ""),
         })
 
     thumb: str = raw.get("thumbnail") or ""
@@ -220,8 +267,9 @@ def _format_info(raw: dict[str, Any]) -> dict[str, Any]:
         "views":         fmt_views(raw.get("view_count")),
         "uploadDate":    fmt_date(raw.get("upload_date")),
         "thumbnail":     thumb,
-        "formats":       formats,
-        "isPlaylist":    bool(raw.get("playlist_id") and playlist_count and playlist_count > 1),
+        "formats":        formats,
+        "friendlySizes":  _friendly_combined_sizes(raw.get("formats", [])),
+        "isPlaylist":     bool(raw.get("playlist_id") and playlist_count and playlist_count > 1),
         "playlistCount": playlist_count,
         "playlistTitle": raw.get("playlist_title") or raw.get("playlist") or "",
     }
@@ -244,10 +292,11 @@ async def ws_info(ws: WebSocket) -> None:
         await ws.close()
         return
 
+    is_short = "/shorts/" in url
     args = [
         sys.executable, "-m", "yt_dlp",
         "--dump-json", "--no-warnings", "--quiet",
-        "--yes-playlist",
+        "--no-playlist" if is_short else "--yes-playlist",
         url,
     ]
 
