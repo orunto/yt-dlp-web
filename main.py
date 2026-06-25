@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -27,8 +27,10 @@ DOWNLOADS_DIR.mkdir(exist_ok=True)
 
 MAX_DOWNLOAD_BYTES = 30 * 1024 ** 3  # 30 GiB hard cap for the downloads directory
 
-_UUID_RE  = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
-_PART_RE  = re.compile(r'\.f\d+\.')   # yt-dlp temp stream files e.g. video.f137.mp4
+_UUID_RE      = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+_PART_RE      = re.compile(r'\.f\d+\.')   # yt-dlp temp stream files e.g. video.f137.mp4
+_FMT_FLAG_RE  = re.compile(r'^[0-9a-zA-Z\[\]\(\)!^<>=+\-*,._/@: ]{1,200}$')
+_pending_streams: dict[str, dict[str, Any]] = {}
 
 app = FastAPI(title="yt-dlp Web Downloader")
 
@@ -476,6 +478,92 @@ def _line_color(line: str) -> str:
         return "#7d8590"
     return "#c9d1d9"
 
+
+# ── Direct-stream endpoints ───────────────────────────────────────────────────
+
+@app.post("/api/stream-token", response_model=None)
+async def create_stream_token(request: Request) -> JSONResponse:
+    """Issue a one-use token so the browser can GET /stream/{token} as a download."""
+    body: dict[str, Any] = await request.json()
+    url = (body.get("url") or "").strip()
+    fmt = (body.get("fmtFlag") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return JSONResponse({"error": "Invalid URL"}, status_code=400)
+    if not fmt or not _FMT_FLAG_RE.match(fmt):
+        return JSONResponse({"error": "Invalid format selector"}, status_code=400)
+    token = str(uuid.uuid4())
+    _pending_streams[token] = body
+
+    async def _expire() -> None:
+        await asyncio.sleep(300)
+        _pending_streams.pop(token, None)
+
+    asyncio.create_task(_expire())
+    return JSONResponse({"token": token})
+
+
+@app.get("/stream/{token}", response_model=None)
+async def stream_download(token: str) -> StreamingResponse | JSONResponse:
+    """Pipe yt-dlp stdout directly to the browser for single-stream formats."""
+    if not _UUID_RE.match(token):
+        return JSONResponse({"error": "Invalid token"}, status_code=400)
+    params = _pending_streams.pop(token, None)
+    if params is None:
+        return JSONResponse({"error": "Invalid or expired token"}, status_code=404)
+
+    url   = (params.get("url")     or "").strip()
+    fmt   = (params.get("fmtFlag") or "best").strip()
+    title = re.sub(r'[^\w\s\-.]', '', (params.get("title") or "download"))[:100].strip() or "download"
+    ext   = re.sub(r'[^\w]', '', (params.get("ext") or "mp4"))[:10] or "mp4"
+
+    args = [
+        sys.executable, "-m", "yt_dlp",
+        "-f", fmt,
+        "-o", "-",
+        "--no-playlist",
+        "--no-warnings",
+        url,
+    ]
+
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        cwd=str(BASE_DIR),
+    )
+
+    loop = asyncio.get_running_loop()
+
+    async def stdout_chunks():
+        assert process.stdout is not None
+        try:
+            while True:
+                chunk = await loop.run_in_executor(None, process.stdout.read, 65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            process.stdout.close()
+            try:
+                process.terminate()
+            except Exception:
+                pass
+            await loop.run_in_executor(None, process.wait)
+
+    mime = "audio/mp4" if ext in ("m4a", "aac") else "video/mp4"
+    encoded_name = quote(f"{title}.{ext}")
+    return StreamingResponse(
+        stdout_chunks(),
+        media_type=mime,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+            "X-Accel-Buffering":   "no",
+            "Cache-Control":       "no-cache",
+        },
+    )
+
+
+# ── Download WebSocket ────────────────────────────────────────────────────────
 
 @app.websocket("/ws/download")
 async def ws_download(ws: WebSocket) -> None:

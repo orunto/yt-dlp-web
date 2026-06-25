@@ -67,9 +67,20 @@
       .title-bar  { flex-direction: column; align-items: flex-start !important; gap: 10px !important; }
       .title-bar .title-right { margin-left: 0 !important; }
     }
+    .toast {
+      position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
+      background: #161616; border: 1px solid #2a2a2a;
+      color: #c9d1d9; font-size: 12px; padding: 10px 18px;
+      display: flex; align-items: center; gap: 10px;
+      white-space: nowrap; pointer-events: none;
+      opacity: 0; transition: opacity .2s ease;
+      z-index: 999;
+    }
+    .toast.visible { opacity: 1; }
   </style>
 </head>
 <body>
+<div id="toast" class="toast"><span class="spinner" style="color:#5a5a5a;"></span><span id="toast-msg"></span><button onclick="app.cancelDownload()" style="pointer-events:auto;margin-left:12px;background:none;border:1px solid #3a3a3a;color:#888;font-size:11px;padding:2px 10px;font-family:inherit;letter-spacing:.5px;cursor:pointer;">cancel</button></div>
 <div style="min-height:100vh;background:#0a0a0a;padding:24px 16px 64px;">
 <div style="max-width:980px;margin:0 auto;">
 
@@ -530,7 +541,7 @@ class App {
             <span style="width:14px;height:14px;border-radius:50%;flex-shrink:0;display:inline-block;
                          border:2px solid ${sel ? 'var(--ac)' : '#444'};
                          background:${sel ? 'var(--ac)' : 'transparent'};"></span>
-            <span style="flex:1;color:${sel ? '#f0f0f0' : '#9a9a9a'};font-size:13px;font-weight:${sel ? '600' : '400'};">${esc(f.label)}</span>
+            <span style="flex:1;color:${sel ? '#f0f0f0' : '#9a9a9a'};font-size:13px;font-weight:${sel ? '600' : '400'};">${esc(f.label)}${f.streaming ? `<span style="color:${sel?'#5a9a5a':'#3a6a3a'};font-size:10px;margin-left:7px;font-weight:400;letter-spacing:.3px;">stream</span>` : ''}</span>
             <span style="color:#5a5a5a;font-size:11px;margin-right:10px;">${esc(f.ext)}</span>
             <span style="color:${sizeProgress ? '#444' : (sel ? 'var(--ac)' : '#555')};font-size:12px;min-width:72px;text-align:right;font-weight:${sel && !sizeProgress ?'600':'400'};font-style:${sizeProgress ? 'italic' : 'normal'};">${sizeProgress ? 'Calculating…' : esc(f.size)}</span>
           </div>`;
@@ -655,16 +666,22 @@ class App {
 
   // ── Friendly format computation ─────────────────────────────────────────────
   _computeFriendlyFormats(formats, friendlySizes = {}) {
-    const byRes = new Map(); // keyed by min(w,h)
+    const byRes   = new Map(); // DASH video-only, keyed by min(w,h)
+    const byMuxed = new Map(); // muxed (video+audio in one stream), keyed by min(w,h)
     const audioOnly = [];
 
     for (const f of formats) {
       if (f.res === 'audio only') { audioOnly.push(f); continue; }
-      if (f.muxed) continue; // skip muxed streams; we download DASH video + audio separately
       const m = f.res.match(/^(\d+)x(\d+)$/);
       if (!m) continue;
       const resKey = Math.min(parseInt(m[1]), parseInt(m[2])); // portrait-aware
       const isH264 = f.codec.startsWith('avc');
+      if (f.muxed) {
+        const existing = byMuxed.get(resKey);
+        if (!existing || (!existing.codec.startsWith('avc') && isH264)) byMuxed.set(resKey, f);
+        continue;
+      }
+      // DASH video-only
       const existing = byRes.get(resKey);
       const existingIsH264 = existing ? existing.codec.startsWith('avc') : false;
       if (!existing || (!existingIsH264 && isH264) || (existingIsH264 === isH264)) {
@@ -672,16 +689,26 @@ class App {
       }
     }
 
-    const resKeys = [...byRes.keys()].sort((a, b) => b - a);
-    const result = resKeys.map(resKey => {
-      const f = byRes.get(resKey);
-      const label = resKey >= 2160 ? '4K Ultra HD'
-                  : resKey >= 1440 ? `${resKey}p  QHD`
-                  : resKey >= 1080 ? `${resKey}p  Full HD`
-                  : resKey >= 720  ? `${resKey}p  HD`
-                  :                   `${resKey}p`;
-      const size = friendlySizes[String(resKey)] ?? f.size;
-      return { key: String(resKey), label, ext: 'mp4', size, sortSpec: `fps,res:${resKey},vcodec:h264,acodec:m4a` };
+    const resLabel = k => k >= 2160 ? '4K Ultra HD'
+                        : k >= 1440 ? `${k}p  QHD`
+                        : k >= 1080 ? `${k}p  Full HD`
+                        : k >= 720  ? `${k}p  HD`
+                        :              `${k}p`;
+
+    // Merge DASH and muxed entries per resolution so they appear adjacent
+    const allResKeys = new Set([...byRes.keys(), ...byMuxed.keys()]);
+    const result = [...allResKeys].sort((a, b) => b - a).flatMap(resKey => {
+      const entries = [];
+      if (byRes.has(resKey)) {
+        const f = byRes.get(resKey);
+        const size = friendlySizes[String(resKey)] ?? f.size;
+        entries.push({ key: String(resKey), label: resLabel(resKey), ext: 'mp4', size, sortSpec: `fps,res:${resKey},vcodec:h264,acodec:m4a` });
+      }
+      if (byMuxed.has(resKey)) {
+        const f = byMuxed.get(resKey);
+        entries.push({ key: `${resKey}-s`, label: resLabel(resKey), ext: f.ext || 'mp4', size: f.size, fmtFlag: f.code, streaming: true });
+      }
+      return entries;
     });
 
     // Best audio: prefer best m4a (last in ascending list), fallback to last overall
@@ -689,7 +716,7 @@ class App {
     const bestAudio = m4aAudio.length ? m4aAudio[m4aAudio.length - 1] : audioOnly[audioOnly.length - 1];
     if (bestAudio) {
       const audioSize = friendlySizes['audio'] ?? bestAudio.size;
-      result.push({ key: 'audio', label: 'Audio only', ext: 'm4a', size: audioSize, fmtFlag: 'ba[ext=m4a]/ba' });
+      result.push({ key: 'audio', label: 'Audio only', ext: 'm4a', size: audioSize, fmtFlag: 'ba[ext=m4a]/ba', streaming: true });
     }
     return result;
   }
@@ -817,10 +844,66 @@ class App {
     };
   }
 
+  // ── Toast ───────────────────────────────────────────────────────────────────
+  _showToast(msg) {
+    document.getElementById('toast-msg').textContent = msg;
+    document.getElementById('toast').classList.add('visible');
+  }
+  _hideToast() {
+    document.getElementById('toast').classList.remove('visible');
+  }
+  cancelDownload() {
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this._hideToast();
+    this._appendLog('Download cancelled.', '#5a5a5a', false);
+  }
+
   // ── Start download ──────────────────────────────────────────────────────────
+  async _startStreamDownload(fmt) {
+    this.state.downloading = true;
+    this._renderDlBtn();
+    document.getElementById('log-lines').innerHTML = '';
+    this._renderLogCursor();
+
+    const { url } = this.state;
+    this._appendLog(`$ yt-dlp -f "${fmt.fmtFlag}" -o - --no-playlist "${url}"`, 'var(--ac)', false);
+
+    try {
+      const res = await fetch('/api/stream-token', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          url,
+          fmtFlag: fmt.fmtFlag,
+          title:   this.state.meta?.title || 'download',
+          ext:     fmt.ext,
+        }),
+      });
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const { token } = await res.json();
+      this._triggerDownload(`/stream/${token}`);
+      this._appendLog('Stream sent to browser — check your download manager.', 'var(--ac)', false);
+    } catch (e) {
+      this._appendLog(`[error] ${e.message}`, '#f85149', false);
+    }
+
+    this.state.downloading = false;
+    this._renderDlBtn();
+    this._renderLogCursor();
+  }
+
   startDownload() {
-    const { downloading, url, selectedQuality, customFmt } = this.state;
+    const { downloading, url, selectedQuality, customFmt, friendlyFormats } = this.state;
     if (downloading || !url.trim() || (!selectedQuality && !customFmt.trim())) return;
+
+    // Single-stream formats bypass WebSocket and pipe directly to the browser
+    if (!customFmt.trim()) {
+      const fmt = friendlyFormats.find(f => f.key === selectedQuality);
+      if (fmt?.streaming) { this._startStreamDownload(fmt); return; }
+    }
 
     this.state.downloading = true;
     this._renderDlBtn();
@@ -835,6 +918,9 @@ class App {
       this.ws.send(JSON.stringify({
         url, mode, ...this._getFormatParams(), pp, outTpl, rate, subLang, skip,
       }));
+      if (this.state.selectedQuality !== 'audio') {
+        this._showToast('Preparing video on server — download will start automatically');
+      }
     };
 
     this.ws.onmessage = ({ data }) => {
@@ -848,6 +934,7 @@ class App {
         this.state.downloading = false;
         this._renderDlBtn();
         this._renderLogCursor();
+        this._hideToast();
         if (msg.exitCode !== 0) {
           this._appendLog(`[error] yt-dlp exited with code ${msg.exitCode}`, '#f85149', false);
         } else if (msg.downloadUrl) {
@@ -862,6 +949,7 @@ class App {
     };
 
     this.ws.onerror = () => {
+      this._hideToast();
       this._appendLog('[error] WebSocket connection failed — is the server running?', '#f85149', false);
       this.state.downloading = false;
       this._renderDlBtn();
